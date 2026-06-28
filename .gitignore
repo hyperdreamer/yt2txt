@@ -1,0 +1,54 @@
+# Agent context / prompt files
+prompt
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Python packaging and build output
+*.egg-info/
+.eggs/
+dist/
+build/
+site/
+pip-wheel-metadata/
+
+# Virtual environments and local config
+.env
+.env.*
+config.yaml
+venv/
+.venv/
+ENV/
+env/
+
+# Node and browser extension dependencies/build output
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+web-ext-artifacts/
+*.crx
+*.pem
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temp audio downloads
+backend/tmp/
+*.mp3
+*.m4a
+*.opus
+*.webm

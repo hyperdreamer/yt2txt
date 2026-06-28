@@ -1,0 +1,27 @@
+# Server bind address. Defaults to "127.0.0.1" when omitted.
+# Use "0.0.0.0" only on a trusted network.
+host: "127.0.0.1"
+
+# Server port. Defaults to 8766 when omitted.
+port: 8766
+
+# AI provider settings for audio transcription.
+ai:
+  # Supported values: "openai" (OpenAI-compatible API).
+  provider: "openai"
+
+  # Base URL for the provider API, without a trailing slash.
+  # Must expose /v1/audio/transcriptions for transcription.
+  api_base: "https://api.openai.com"
+
+  # API key. Plaintext values are used directly.
+  # Prefix with ``$`` to treat the value as an environment variable name
+  # (e.g. ``$OPENAI_API_KEY`` resolves os.getenv("OPENAI_API_KEY")).
+  # Falls back to OPENAI_API_KEY env var if omitted.
+  api_key: "$OPENAI_API_KEY"
+
+  # Default transcription model (gpt-4o-transcribe or gpt-4o-min-transcribe).
+  model: "gpt-4o-transcribe"
+
+# Enable debug logging to stderr.
+# debug: false
