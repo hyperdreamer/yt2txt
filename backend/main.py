@@ -94,7 +94,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.6")
+app = FastAPI(title="YT2TXT", version="0.0.7")
 
 
 # ── Request logging ─────────────────────────────────────────────
@@ -286,25 +286,27 @@ def _has_subtitles(list_subs_output: str) -> bool:
 # ── OpenAI transcription ────────────────────────────────────────
 
 
-async def _transcribe_audio(
-    audio_path: str, config: AppConfig, model: str
+MAX_AUDIO_BYTES = 24 * 1024 * 1024  # OpenAI 25MB limit, leave 1MB for multipart overhead
+CHUNK_DURATION_SECONDS = 25 * 60   # ~25 minutes per chunk at 64kbps ≈ 12MB
+
+
+async def _transcribe_file(
+    audio_path: str, config: AppConfig, model: str, chunk_label: str = ""
 ) -> str:
-    """Send audio to OpenAI /v1/audio/transcriptions and return text."""
+    """Send a single audio file to OpenAI /v1/audio/transcriptions and return text."""
     if not config.api_key:
         raise HTTPException(
             status_code=500,
             detail="No API key configured. Set OPENAI_API_KEY or ai.api_key in config.yaml.",
         )
 
-    url = f"{config.api_base}/v1/audio/transcriptions"
+    url = f"{config.api_base}/audio/transcriptions"
 
-    # Read audio file
     with open(audio_path, "rb") as f:
         audio_data = f.read()
 
     filename = os.path.basename(audio_path)
 
-    # Build multipart form data manually (no extra deps)
     boundary = os.urandom(16).hex()
     body = b""
     for field_name, field_value in [
@@ -328,13 +330,13 @@ async def _transcribe_audio(
         "Content-Type": f"multipart/form-data; boundary={boundary}",
     }
 
-    deadline = 600  # 10 min max for transcription
+    deadline = 300  # 5 min per chunk
 
     last_exc: Exception | None = None
     for attempt in (1, 2):
         try:
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
+                timeout=httpx.Timeout(connect=10.0, read=deadline, write=60.0, pool=10.0)
             ) as client:
                 response = await asyncio.wait_for(
                     client.post(url, headers=headers, content=body),
@@ -365,7 +367,8 @@ async def _transcribe_audio(
                     detail=f"Transcription API failed: {detail}",
                 )
             text = response.text.strip()
-            _debug("transcribe", f"Got {len(text)} chars of transcription")
+            label = f" ({chunk_label})" if chunk_label else ""
+            _debug("transcribe", f"Got {len(text)} chars of transcription{label}")
             return text
 
         if attempt == 1:
@@ -373,6 +376,75 @@ async def _transcribe_audio(
 
     assert last_exc is not None
     raise last_exc
+
+
+async def _transcribe_audio(
+    audio_path: str, config: AppConfig, model: str
+) -> str:
+    """Transcribe audio, chunking if file exceeds OpenAI's 25MB limit.
+
+    If the file is ≤24MB, transcribes directly.
+    If larger, splits with ffmpeg into ~23MB chunks, transcribes each,
+    and joins the results.
+    """
+    file_size = os.path.getsize(audio_path)
+
+    if file_size <= MAX_AUDIO_BYTES:
+        _debug("transcribe", f"File {file_size / 1024 / 1024:.1f}MB — direct transcription")
+        return await _transcribe_file(audio_path, config, model)
+
+    _debug("transcribe", f"File {file_size / 1024 / 1024:.1f}MB — splitting into chunks")
+
+    ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+    chunks_dir = os.path.join(os.path.dirname(audio_path), "chunks")
+    os.makedirs(chunks_dir, exist_ok=True)
+
+    # Split into chunks of ~CHUNK_DURATION_SECONDS each
+    chunk_pattern = os.path.join(chunks_dir, "chunk_%03d.mp3")
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg,
+            "-y",
+            "-i", audio_path,
+            "-f", "segment",
+            "-segment_time", str(CHUNK_DURATION_SECONDS),
+            "-c", "copy",
+            chunk_pattern,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        if proc.returncode != 0:
+            err = stderr.decode("utf-8", errors="replace")[:300]
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to split audio: {err}",
+            )
+    except asyncio.TimeoutError:
+        if proc:
+            proc.kill()
+        raise HTTPException(status_code=504, detail="Audio splitting timed out")
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=500,
+            detail="ffmpeg is not installed. Required for splitting long audio files.",
+        )
+
+    chunks = sorted(
+        [os.path.join(chunks_dir, f) for f in os.listdir(chunks_dir) if f.endswith(".mp3")]
+    )
+    _debug("transcribe", f"Split into {len(chunks)} chunks")
+
+    texts: list[str] = []
+    for i, chunk_path in enumerate(chunks):
+        _debug("transcribe", f"Transcribing chunk {i + 1}/{len(chunks)}")
+        text = await _transcribe_file(chunk_path, config, model, f"chunk {i + 1}/{len(chunks)}")
+        texts.append(text)
+
+    joined = "\n\n".join(texts)
+    _debug("transcribe", f"Joined {len(chunks)} chunks → {len(joined)} chars")
+    return joined
 
 
 # ── Endpoints ───────────────────────────────────────────────────
@@ -462,6 +534,8 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
                     "--extract-audio",
                     "--audio-format",
                     "mp3",
+                    "--postprocessor-args",
+                    "ffmpeg:-b:a 64k -ac 1",  # mono 64kbps — keeps under 25MB for ~50min
                     "-o",
                     os.path.join(tmpdir, "%(id)s.%(ext)s"),
                     url,
