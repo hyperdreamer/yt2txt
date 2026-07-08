@@ -7,10 +7,10 @@ port: 8766
 
 # AI provider settings for audio transcription.
 ai:
-  # Supported values: "openai" (OpenAI-compatible API).
-  provider: "openai"
+  # Model to use for transcription (gpt-4o-transcribe or gpt-4o-min-transcribe).
+  model: "gpt-4o-transcribe"
 
-  # Base URL for the provider API, without a trailing slash.
+  # API base URL. /v1 is auto-appended if omitted.
   # Must expose /v1/audio/transcriptions for transcription.
   api_base: "https://api.openai.com"
 
@@ -19,9 +19,6 @@ ai:
   # (e.g. ``$OPENAI_API_KEY`` resolves os.getenv("OPENAI_API_KEY")).
   # Falls back to OPENAI_API_KEY env var if omitted.
   api_key: "$OPENAI_API_KEY"
-
-  # Default transcription model (gpt-4o-transcribe or gpt-4o-min-transcribe).
-  model: "gpt-4o-transcribe"
 
 # Enable debug logging to stderr.
 # debug: false

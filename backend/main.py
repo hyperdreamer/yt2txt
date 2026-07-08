@@ -53,7 +53,7 @@ class AppConfig:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     debug: bool = False
-    api_base: str = "https://api.openai.com"
+    api_base: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = DEFAULT_MODEL
 
@@ -77,11 +77,16 @@ def load_config() -> AppConfig:
     if not api_key:
         api_key = os.getenv("OPENAI_API_KEY", "")
 
+    # Normalize api_base: auto-append /v1 if not present
+    api_base = str(ai_section.get("api_base", "https://api.openai.com"))
+    if not api_base.rstrip("/").endswith("/v1"):
+        api_base = api_base.rstrip("/") + "/v1"
+
     return AppConfig(
         host=str(raw.get("host", DEFAULT_HOST)),
         port=int(raw.get("port", DEFAULT_PORT)),
         debug=bool(raw.get("debug", False)),
-        api_base=str(ai_section.get("api_base", "https://api.openai.com")).rstrip("/"),
+        api_base=api_base,
         api_key=api_key,
         model=str(ai_section.get("model", DEFAULT_MODEL)),
     )
@@ -89,7 +94,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.3")
+app = FastAPI(title="YT2TXT", version="0.0.4")
 
 
 # ── Request logging ─────────────────────────────────────────────
