@@ -94,7 +94,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.8")
+app = FastAPI(title="YT2TXT", version="0.0.9")
 
 
 # ── Request logging ─────────────────────────────────────────────
@@ -482,22 +482,22 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
 
         if list_output and _has_subtitles(list_output):
             _debug("transcript", "Subtitles available — extracting")
+            sub_args = [
+                "--write-subs",
+                "--write-auto-subs",
+                "--skip-download",
+                "--convert-subs",
+                "srt",
+                "-o",
+                os.path.join(tmpdir, "%(id)s.%(ext)s"),
+                url,
+            ]
+            # If language is set, add --sub-langs; empty = Original (yt-dlp default)
+            if language:
+                sub_args.insert(2, language)
+                sub_args.insert(2, "--sub-langs")
             try:
-                await _run_ytdlp(
-                    [
-                        "--write-subs",
-                        "--write-auto-subs",
-                        "--sub-langs",
-                        language,
-                        "--skip-download",
-                        "--convert-subs",
-                        "srt",
-                        "-o",
-                        os.path.join(tmpdir, "%(id)s.%(ext)s"),
-                        url,
-                    ],
-                    timeout=300,
-                )
+                await _run_ytdlp(sub_args, timeout=300)
             except HTTPException:
                 raise
 
