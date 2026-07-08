@@ -48,7 +48,7 @@ export OPENAI_API_KEY="sk-..."
 python main.py
 ```
 
-The server starts on `http://127.0.0.1:8766` by default.
+The server starts on `http://127.0.0.1:8666` by default.
 
 ### 4. Load the extension
 

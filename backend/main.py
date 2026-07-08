@@ -30,7 +30,7 @@ from pydantic import BaseModel
 
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8766
+DEFAULT_PORT = 8666
 DEFAULT_MODEL = "gpt-4o-transcribe"
 PRODUCTION = not os.environ.get("FLASK_DEBUG")
 
@@ -94,7 +94,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.4")
+app = FastAPI(title="YT2TXT", version="0.0.5")
 
 
 # ── Request logging ─────────────────────────────────────────────

@@ -2,8 +2,8 @@
 # Use "0.0.0.0" only on a trusted network.
 host: "127.0.0.1"
 
-# Server port. Defaults to 8766 when omitted.
-port: 8766
+# Server port. Defaults to 8666 when omitted.
+port: 8666
 
 # AI provider settings for audio transcription.
 ai:

@@ -47,7 +47,7 @@ async function init() {
   // Load settings
   const items = await chrome.storage.sync.get({
     yt2txtHost: 'localhost',
-    yt2txtPort: 8766,
+    yt2txtPort: 8666,
   });
   hostInput.value = items.yt2txtHost;
   portInput.value = items.yt2txtPort;

@@ -1,6 +1,6 @@
 // ── Constants ────────────────────────────────────────────────────
 const DEFAULT_HOST = 'localhost';
-const DEFAULT_PORT = 8766;
+const DEFAULT_PORT = 8666;
 const BACKEND_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const LOCAL_BACKEND_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
