@@ -149,12 +149,64 @@
       gap: 6px;
       margin-top: 8px;
     }
+
+    /* ── Light theme ──────────────────────────────────────── */
+    @media (prefers-color-scheme: light) {
+      body {
+        background: #f8fafc;
+        color: #0f172a;
+      }
+      .header h1 { color: #0284c7; }
+      .header .version { color: #94a3b8; }
+
+      .settings label { color: #64748b; }
+      .settings input {
+        border-color: #cbd5e1;
+        background: #ffffff;
+        color: #0f172a;
+      }
+      .settings input:focus { border-color: #0284c7; }
+
+      #url {
+        border-color: #cbd5e1;
+        background: #ffffff;
+        color: #0f172a;
+      }
+      #url:focus { border-color: #0284c7; }
+
+      button.primary {
+        background: #0284c7;
+        color: #fff;
+      }
+      button.primary:hover:not(:disabled) { background: #0369a1; }
+      button.danger {
+        background: #dc2626;
+        color: #fff;
+      }
+      button.danger:hover:not(:disabled) { background: #b91c1c; }
+      button.secondary {
+        background: #e2e8f0;
+        color: #334155;
+      }
+      button.secondary:hover:not(:disabled) { background: #cbd5e1; }
+
+      #status-bar { color: #64748b; }
+      #status-bar.error { color: #dc2626; }
+      #status-bar.success { color: #16a34a; }
+
+      #result {
+        border-color: #cbd5e1;
+        background: #ffffff;
+        color: #0f172a;
+      }
+      #result:focus { border-color: #0284c7; }
+    }
   </style>
 </head>
 <body>
   <div class="header">
     <h1>YT2TXT</h1>
-    <span class="version">v0.0.1</span>
+    <span class="version">v0.0.2</span>
   </div>
 
   <div class="settings">
