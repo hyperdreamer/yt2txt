@@ -94,7 +94,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.5")
+app = FastAPI(title="YT2TXT", version="0.0.6")
 
 
 # ── Request logging ─────────────────────────────────────────────
@@ -174,8 +174,8 @@ class TranscriptResponse(BaseModel):
 YT_DLP = shutil.which("yt-dlp") or "yt-dlp"
 
 
-async def _run_ytdlp(args: list[str], timeout: float = 120) -> str:
-    """Run yt-dlp and return stdout. Raises RuntimeError on failure."""
+async def _run_ytdlp(args: list[str], timeout: float = 180) -> str:
+    """Run yt-dlp and return stdout. Kills process on timeout. Raises on failure."""
     cmd = [YT_DLP, *args]
     _debug("ytdlp", f"Running: {shlex.join(cmd)}")
     try:
@@ -184,18 +184,27 @@ async def _run_ytdlp(args: list[str], timeout: float = 120) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="yt-dlp timed out")
     except FileNotFoundError:
         raise HTTPException(
             status_code=500,
             detail="yt-dlp is not installed. Install it with: pip install yt-dlp",
         )
 
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            pass
+        raise HTTPException(
+            status_code=504,
+            detail=f"yt-dlp timed out after {timeout}s",
+        )
+
     if proc.returncode != 0:
         err = stderr.decode("utf-8", errors="replace").strip()
-        # Don't expose raw yt-dlp output to client in production
         detail = err[:500] if not PRODUCTION else "yt-dlp failed to process the URL"
         raise HTTPException(status_code=500, detail=detail)
 
@@ -391,7 +400,7 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
             list_output = await _run_ytdlp(
-                ["--list-subs", "--skip-download", url], timeout=30
+                ["--list-subs", "--skip-download", url], timeout=60
             )
         except HTTPException:
             # If --list-subs fails, try downloading audio directly
@@ -413,7 +422,7 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
                         os.path.join(tmpdir, "%(id)s.%(ext)s"),
                         url,
                     ],
-                    timeout=120,
+                    timeout=300,
                 )
             except HTTPException:
                 raise
@@ -457,7 +466,7 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
                     os.path.join(tmpdir, "%(id)s.%(ext)s"),
                     url,
                 ],
-                timeout=300,
+                timeout=600,
             )
         except HTTPException:
             raise

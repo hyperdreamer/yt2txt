@@ -1,7 +1,7 @@
 // ── Constants ────────────────────────────────────────────────────
 const DEFAULT_HOST = 'localhost';
 const DEFAULT_PORT = 8666;
-const BACKEND_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const BACKEND_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 const LOCAL_BACKEND_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 // ── Backend URL cache ───────────────────────────────────────────
@@ -252,7 +252,7 @@ async function handleStart(msg) {
   } catch (e) {
     if (e.name === 'AbortError') {
       const msg = timedOut
-        ? 'Request timed out after 10 minutes.'
+        ? "Request timed out after 15 minutes."
         : 'Stopped by user.';
       updateState(tab.id, {
         active: false,
