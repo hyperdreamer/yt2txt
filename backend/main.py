@@ -94,7 +94,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.9")
+app = FastAPI(title="YT2TXT", version="0.0.10")
 
 
 # ── Request logging ─────────────────────────────────────────────
@@ -288,7 +288,38 @@ def _has_subtitles(list_subs_output: str) -> bool:
 
 
 MAX_AUDIO_BYTES = 24 * 1024 * 1024  # OpenAI 25MB limit, leave 1MB for multipart overhead
-CHUNK_DURATION_SECONDS = 25 * 60   # ~25 minutes per chunk at 64kbps ≈ 12MB
+MAX_AUDIO_DURATION = 1300          # seconds — under OpenAI's 1400s limit per request
+CHUNK_DURATION_SECONDS = 20 * 60   # ~20 minutes per chunk at 64kbps ≈ 10MB
+
+AUDIO_BITRATE_BPS = 64_000         # matches yt-dlp --postprocessor-args 64k
+
+
+def _estimate_duration(file_size: int) -> float:
+    """Estimate audio duration from file size and configured bitrate."""
+    return (file_size * 8) / AUDIO_BITRATE_BPS  # bits / bps = seconds
+
+
+async def _get_audio_duration(audio_path: str) -> float:
+    """Get actual audio duration in seconds using ffprobe. Falls back to estimate."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return _estimate_duration(os.path.getsize(audio_path))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ffprobe,
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+            audio_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode == 0 and stdout.strip():
+            return float(stdout.decode().strip())
+    except Exception:
+        pass
+    return _estimate_duration(os.path.getsize(audio_path))
 
 
 async def _transcribe_file(
@@ -382,19 +413,23 @@ async def _transcribe_file(
 async def _transcribe_audio(
     audio_path: str, config: AppConfig, model: str
 ) -> str:
-    """Transcribe audio, chunking if file exceeds OpenAI's 25MB limit.
+    """Transcribe audio, chunking if file exceeds OpenAI's 25MB limit or 1400s duration.
 
-    If the file is ≤24MB, transcribes directly.
-    If larger, splits with ffmpeg into ~23MB chunks, transcribes each,
-    and joins the results.
+    If the file is ≤24MB and ≤1300s, transcribes directly.
+    Otherwise splits with ffmpeg into chunks, transcribes each, and joins.
     """
     file_size = os.path.getsize(audio_path)
+    duration = await _get_audio_duration(audio_path)
 
-    if file_size <= MAX_AUDIO_BYTES:
-        _debug("transcribe", f"File {file_size / 1024 / 1024:.1f}MB — direct transcription")
+    if file_size <= MAX_AUDIO_BYTES and duration <= MAX_AUDIO_DURATION:
+        _debug("transcribe", f"File {file_size / 1024 / 1024:.1f}MB, {duration:.0f}s — direct")
         return await _transcribe_file(audio_path, config, model)
 
-    _debug("transcribe", f"File {file_size / 1024 / 1024:.1f}MB — splitting into chunks")
+    reason = "size" if file_size > MAX_AUDIO_BYTES else "duration"
+    _debug(
+        "transcribe",
+        f"File {file_size / 1024 / 1024:.1f}MB, {duration:.0f}s — splitting ({reason})",
+    )
 
     ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
     chunks_dir = os.path.join(os.path.dirname(audio_path), "chunks")
