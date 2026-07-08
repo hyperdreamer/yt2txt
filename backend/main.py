@@ -94,7 +94,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.7")
+app = FastAPI(title="YT2TXT", version="0.0.8")
 
 
 # ── Request logging ─────────────────────────────────────────────
@@ -160,6 +160,7 @@ signal.signal(signal.SIGINT, _handle_shutdown)
 class TranscriptRequest(BaseModel):
     url: str
     model: str | None = None
+    language: str = "en"
 
 
 class TranscriptResponse(BaseModel):
@@ -465,8 +466,9 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
     url = req.url.strip()
 
     model = req.model or config.model
+    language = req.language or "en"
 
-    _debug("transcript", f"Processing: {url}")
+    _debug("transcript", f"Processing: {url} [lang={language}]")
 
     # ── Try subtitles first ──────────────────────────────────
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -486,7 +488,7 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
                         "--write-subs",
                         "--write-auto-subs",
                         "--sub-langs",
-                        "all",
+                        language,
                         "--skip-download",
                         "--convert-subs",
                         "srt",

@@ -221,7 +221,7 @@ async function handleStart(msg) {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: msg.url }),
+        body: JSON.stringify({ url: msg.url, language: msg.lang || 'en' }),
       },
       controller.signal
     );

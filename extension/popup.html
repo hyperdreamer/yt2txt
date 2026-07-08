@@ -42,8 +42,7 @@
       font-size: 11px;
       color: #94a3b8;
     }
-    .settings input {
-      width: 100px;
+    .settings input, .settings select {
       padding: 4px 6px;
       border: 1px solid #334155;
       border-radius: 4px;
@@ -51,7 +50,9 @@
       color: #e2e8f0;
       font-size: 12px;
     }
-    .settings input:focus {
+    .settings input { width: 100px; }
+    .settings select { width: 72px; cursor: pointer; }
+    .settings input:focus, .settings select:focus {
       border-color: #38bdf8;
       outline: none;
     }
@@ -160,12 +161,12 @@
       .header .version { color: #94a3b8; }
 
       .settings label { color: #64748b; }
-      .settings input {
+      .settings input, .settings select {
         border-color: #cbd5e1;
         background: #ffffff;
         color: #0f172a;
       }
-      .settings input:focus { border-color: #0284c7; }
+      .settings input:focus, .settings select:focus { border-color: #0284c7; }
 
       #url {
         border-color: #cbd5e1;
@@ -206,12 +207,28 @@
 <body>
   <div class="header">
     <h1>YT2TXT</h1>
-    <span class="version">v0.0.7</span>
+    <span class="version">v0.0.8</span>
   </div>
 
   <div class="settings">
     <label>Host <input id="host" type="text" placeholder="localhost"></label>
     <label>Port <input id="port" type="number" placeholder="8666"></label>
+    <label>Lang
+      <select id="lang">
+        <option value="en">EN</option>
+        <option value="zh">中文</option>
+        <option value="ja">日本語</option>
+        <option value="ko">한국어</option>
+        <option value="es">ES</option>
+        <option value="fr">FR</option>
+        <option value="de">DE</option>
+        <option value="ru">RU</option>
+        <option value="ar">AR</option>
+        <option value="pt">PT</option>
+        <option value="hi">HI</option>
+        <option value="all">All</option>
+      </select>
+    </label>
   </div>
 
   <div class="url-row">

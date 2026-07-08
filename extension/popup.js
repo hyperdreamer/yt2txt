@@ -8,6 +8,7 @@ const copyBtn = document.getElementById('copy');
 const downloadBtn = document.getElementById('download');
 const hostInput = document.getElementById('host');
 const portInput = document.getElementById('port');
+const langSelect = document.getElementById('lang');
 
 // ── State ──────────────────────────────────────────────────────
 let latestState = null;
@@ -27,6 +28,7 @@ copyBtn.addEventListener('click', copyText);
 downloadBtn.addEventListener('click', downloadText);
 hostInput.addEventListener('change', saveSettings);
 portInput.addEventListener('change', saveSettings);
+langSelect.addEventListener('change', saveSettings);
 resultEl.addEventListener('input', () => {
   userEditedResult = true;
   updateResultButtons();
@@ -48,9 +50,11 @@ async function init() {
   const items = await chrome.storage.sync.get({
     yt2txtHost: 'localhost',
     yt2txtPort: 8666,
+    yt2txtLang: 'en',
   });
   hostInput.value = items.yt2txtHost;
   portInput.value = items.yt2txtPort;
+  langSelect.value = items.yt2txtLang;
 
   // Pre-fill URL from current tab
   if (tab?.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('about:')) {
@@ -74,7 +78,8 @@ async function init() {
 async function saveSettings() {
   await chrome.storage.sync.set({
     yt2txtHost: hostInput.value.trim() || 'localhost',
-    yt2txtPort: parseInt(portInput.value, 10) || 8766,
+    yt2txtPort: parseInt(portInput.value, 10) || 8666,
+    yt2txtLang: langSelect.value,
   });
 }
 
@@ -114,6 +119,7 @@ async function startCapture() {
     const response = await chrome.runtime.sendMessage({
       type: 'popup:start',
       url,
+      lang: langSelect.value,
     });
     if (!response?.ok) {
       statusBar.textContent = response?.error || 'Failed to start.';
