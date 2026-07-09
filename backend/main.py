@@ -94,7 +94,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.12")
+app = FastAPI(title="YT2TXT", version="0.0.13")
 
 
 # ── Request logging ─────────────────────────────────────────────
@@ -590,16 +590,24 @@ async def _transcribe_audio(
     for i in range(num_chunks):
         start = max(0.0, i * CHUNK_DURATION_SECONDS
                     - (CHUNK_OVERLAP_SECONDS if i > 0 else 0))
-        end = min(duration,
-                  (i + 1) * CHUNK_DURATION_SECONDS + CHUNK_OVERLAP_SECONDS)
-        chunk_path = os.path.join(chunks_dir, f"chunk_{i:03d}.mp3")
-        proc = await asyncio.create_subprocess_exec(
+        is_last = (i == num_chunks - 1)
+        # ffprobe duration can be slightly shorter than the actual file
+        # (rounding, mp3 frame padding).  For the last chunk, omit -to so
+        # ffmpeg copies to the true EOF instead of stopping at `duration`.
+        ffmpeg_args: list[str] = [
             ffmpeg,
             "-y",
             "-i", audio_path,
             "-ss", str(start),
-            "-to", str(end),
             "-c", "copy",
+        ]
+        if not is_last:
+            end = min(duration,
+                      (i + 1) * CHUNK_DURATION_SECONDS + CHUNK_OVERLAP_SECONDS)
+            ffmpeg_args += ["-to", str(end)]
+        chunk_path = os.path.join(chunks_dir, f"chunk_{i:03d}.mp3")
+        proc = await asyncio.create_subprocess_exec(
+            *ffmpeg_args,
             chunk_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
