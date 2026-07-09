@@ -94,7 +94,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.10")
+app = FastAPI(title="YT2TXT", version="0.0.11")
 
 
 # ── Request logging ─────────────────────────────────────────────
@@ -160,7 +160,7 @@ signal.signal(signal.SIGINT, _handle_shutdown)
 class TranscriptRequest(BaseModel):
     url: str
     model: str | None = None
-    language: str = "en"
+    language: str = ""
 
 
 class TranscriptResponse(BaseModel):
@@ -254,34 +254,147 @@ def _parse_subtitle_text(path: str) -> str:
     return "\n".join(lines)
 
 
-def _has_subtitles(list_subs_output: str) -> bool:
-    """Check if yt-dlp --list-subs output indicates available subtitles."""
-    # Look for language codes in the subtitles listing
-    for line in list_subs_output.splitlines():
-        line = line.strip()
-        # Auto-generated subtitles lines look like: "en,fr,ja,..."
-        # Available subtitles: "Language Name" or just language codes
-        if (
-            "Available subtitles" in line
-            or "Available automatic captions" in line
-            or "has subtitles" in line.lower()
-        ):
-            return True
-    # Also check if any language code lines exist
+def _parse_subtitle_langs(list_subs_output: str) -> tuple[set[str], set[str]]:
+    """Parse yt-dlp --list-subs output into (manual_langs, auto_langs).
+
+    manual_langs: simple codes like {"en", "de", "zh"}
+    auto_langs: compound codes like {"en-en", "zh-Hans-en", "fr-en"}
+
+    yt-dlp format:
+        [info] Available subtitles for VIDEOID:
+        Language Name    Formats
+        en       English vtt, srt, ttml...
+
+        [info] Available automatic captions for VIDEOID:
+        Language   Name                    Formats
+        en-en      English from English    vtt, srt, ttml...
+        zh-Hans-en Chinese (Simplified) from English  vtt, srt, ttml...
+    """
     import re
 
-    lines = list_subs_output.splitlines()
-    in_subs_section = False
-    for line in lines:
-        if "subtitles" in line.lower() or "caption" in line.lower():
-            in_subs_section = True
-            continue
-        if in_subs_section and re.match(r"^\s*[a-z]{2,3}(\s|$)", line):
-            return True
-        if line.strip() == "":
-            in_subs_section = False
+    manual: set[str] = set()
+    auto: set[str] = set()
+    section: str | None = None
+    # Match simple codes (en, de) and compound codes (en-en, zh-Hans-en).
+    code_re = re.compile(r"^\s*([A-Za-z]{2,3}(?:-[A-Za-z]{2,4}){0,3})(?:\s|$)")
 
-    return False
+    for raw_line in list_subs_output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "Available subtitles" in line:
+            section = "manual"
+            continue
+        if "Available automatic captions" in line:
+            section = "auto"
+            continue
+        # Skip the column header line that follows each section banner.
+        if line.lower().startswith("language"):
+            continue
+        if section is None:
+            continue
+        m = code_re.match(raw_line)
+        if not m:
+            continue
+        code = m.group(1)
+        if section == "manual":
+            manual.add(code)
+        else:
+            auto.add(code)
+
+    return manual, auto
+
+
+def _resolve_auto_lang(lang: str, auto_langs: set[str]) -> str | None:
+    """Resolve a simple language code (e.g. "en") to a compound auto-subs code.
+
+    yt-dlp --write-auto-subs requires compound codes (en-en, zh-Hans-en) but
+    users normally think in simple codes. Match by checking which auto code
+    starts with "<lang>-". Returns the matched compound code, or None.
+    """
+    if not lang:
+        return None
+    prefix = f"{lang}-"
+    for code in auto_langs:
+        if code.startswith(prefix):
+            return code
+    return None
+
+
+def _resolve_subs_path(tmpdir: str, url: str) -> str | None:
+    """Return the first .srt/.vtt path written into tmpdir, or None."""
+    for fname in os.listdir(tmpdir):
+        if not fname.endswith((".srt", ".vtt")):
+            continue
+        full = os.path.join(tmpdir, fname)
+        if os.path.isfile(full):
+            return full
+    return None
+
+
+async def _download_subs_manual(
+    url: str, lang: str | None, tmpdir: str
+) -> str | None:
+    """Try to download manual subtitles. Returns .srt/.vtt path or None.
+
+    lang: simple code (e.g. "en"), "all", "" for yt-dlp default, or None.
+    """
+    args: list[str] = [
+        "--write-subs",
+        "--no-write-auto-subs",
+        "--skip-download",
+        "--convert-subs",
+        "srt",
+    ]
+    if lang:
+        # yt-dlp accepts "all" or comma-separated simple codes here.
+        args += ["--sub-langs", lang]
+    args += ["-o", os.path.join(tmpdir, "%(id)s.%(ext)s"), url]
+    try:
+        await _run_ytdlp(args, timeout=300)
+    except HTTPException as exc:
+        _debug("subs", f"manual download failed: {exc.detail}")
+        return None
+    return _resolve_subs_path(tmpdir, url)
+
+
+async def _download_subs_auto(
+    url: str,
+    lang: str | None,
+    tmpdir: str,
+    auto_langs: set[str] | None = None,
+) -> str | None:
+    """Try to download auto-generated captions. Returns .srt/.vtt path or None.
+
+    lang: simple code (e.g. "en"), "" for yt-dlp default, or None.
+    When auto_langs is provided and lang is set, the simple code is resolved to
+    the matching compound code required by yt-dlp --write-auto-subs.
+    """
+    args: list[str] = [
+        "--write-auto-subs",
+        "--no-write-subs",
+        "--skip-download",
+        "--convert-subs",
+        "srt",
+    ]
+    sub_langs: str | None = None
+    if lang:
+        compound = _resolve_auto_lang(lang, auto_langs) if auto_langs else None
+        if compound:
+            sub_langs = compound
+        else:
+            # Best-effort fallback: pass the simple code anyway. yt-dlp will
+            # error and we will return None to the caller.
+            sub_langs = lang
+    if sub_langs:
+        args += ["--sub-langs", sub_langs]
+    args += ["-o", os.path.join(tmpdir, "%(id)s.%(ext)s"), url]
+    try:
+        await _run_ytdlp(args, timeout=300)
+    except HTTPException as exc:
+        _debug("subs", f"auto download failed: {exc.detail}")
+        return None
+    return _resolve_subs_path(tmpdir, url)
 
 
 # ── OpenAI transcription ────────────────────────────────────────
@@ -501,7 +614,7 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
     url = req.url.strip()
 
     model = req.model or config.model
-    language = req.language or "en"
+    language = (req.language or "").strip()
 
     _debug("transcript", f"Processing: {url} [lang={language}]")
 
@@ -515,51 +628,61 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
             # If --list-subs fails, try downloading audio directly
             list_output = ""
 
-        if list_output and _has_subtitles(list_output):
-            _debug("transcript", "Subtitles available — extracting")
-            sub_args = [
-                "--write-subs",
-                "--write-auto-subs",
-                "--skip-download",
-                "--convert-subs",
-                "srt",
-                "-o",
-                os.path.join(tmpdir, "%(id)s.%(ext)s"),
-                url,
-            ]
-            # If language is set, add --sub-langs; empty = Original (yt-dlp default)
-            if language:
-                sub_args.insert(2, language)
-                sub_args.insert(2, "--sub-langs")
-            try:
-                await _run_ytdlp(sub_args, timeout=300)
-            except HTTPException:
-                raise
+        # Parse available subtitle languages (may be empty if --list-subs failed).
+        manual_langs, auto_langs = _parse_subtitle_langs(list_output) if list_output else (set(), set())
+        _debug(
+            "subs",
+            f"Available — manual: {sorted(manual_langs) or 'none'}, "
+            f"auto: {sorted(auto_langs) or 'none'}",
+        )
 
-            video_id = ""
-            # Try to extract video ID from URL or from downloaded files
-            for fname in os.listdir(tmpdir):
-                if fname.endswith((".srt", ".vtt")):
-                    video_id = os.path.splitext(fname)[0]
-                    # Strip language suffix (e.g. "abc123.en" → "abc123")
-                    parts = video_id.rsplit(".", 1)
-                    if len(parts) == 2 and len(parts[1]) <= 5:
-                        video_id = parts[0]
-                    break
+        # Resolve the requested language. Empty string = yt-dlp default
+        # (video's original language); the helpers omit --sub-langs in that case.
+        req_lang: str | None = language or None
 
-            sub_path = _find_subtitle_file(tmpdir, video_id)
-            if sub_path:
-                text = _parse_subtitle_text(sub_path)
-                _debug("transcript", f"Extracted {len(text)} chars from subtitles")
-                return {
-                    "text": text,
-                    "source": "subtitles",
-                    "model": "yt-dlp",
-                    "error": None,
-                }
+        # If the user picked a specific language that isn't available in either
+        # section, fall through to transcription. This avoids yt-dlp errors
+        # for unavailable languages and gives a consistent fallback path.
+        if req_lang and req_lang != "all":
+            in_manual = req_lang in manual_langs
+            in_auto = _resolve_auto_lang(req_lang, auto_langs) is not None
+            if not (in_manual or in_auto):
+                _debug(
+                    "subs",
+                    f"Requested language '{req_lang}' not available — falling back to transcription",
+                )
+                req_lang = None
 
-            # Fallback: subtitles listed but extraction failed
-            _debug("transcript", "Subtitles listed but not found — falling back to transcription")
+        # Try manual subs first (preferred over auto-generated captions).
+        sub_path: str | None = None
+        # Manual attempt is worth running when:
+        #   - the video has any manual track, OR
+        #   - we have a specific language to filter by (lets yt-dlp try
+        #     the requested manual language even if list-subs output was empty).
+        try_manual = bool(manual_langs) or bool(req_lang)
+        if try_manual:
+            _debug("subs", f"Trying manual subs (lang={req_lang or 'default'})")
+            sub_path = await _download_subs_manual(url, req_lang, tmpdir)
+
+        # If manual didn't yield a file, try auto-generated captions
+        # whenever auto subs are available for this video.
+        if not sub_path and auto_langs:
+            _debug("subs", f"Trying auto-generated subs (lang={req_lang or 'default'})")
+            sub_path = await _download_subs_auto(url, req_lang, tmpdir, auto_langs)
+
+        if sub_path and os.path.isfile(sub_path):
+            text = _parse_subtitle_text(sub_path)
+            _debug("transcript", f"Extracted {len(text)} chars from subtitles")
+            return {
+                "text": text,
+                "source": "subtitles",
+                "model": "yt-dlp",
+                "error": None,
+            }
+
+        # No subtitles available (or extraction failed) — fall back to transcription.
+        if list_output:
+            _debug("transcript", "No usable subtitles — falling back to transcription")
 
         # ── Download audio and transcribe ────────────────────
         _debug("transcript", "Downloading audio for transcription")
