@@ -8,14 +8,17 @@ Two paths:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shlex
 import shutil
 import signal
+import sqlite3
 import sys
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -56,6 +59,8 @@ class AppConfig:
     api_base: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = DEFAULT_MODEL
+    cache_enabled: bool = True
+    cache_ttl_days: int = 30
 
 
 def load_config() -> AppConfig:
@@ -82,6 +87,10 @@ def load_config() -> AppConfig:
     if not api_base.rstrip("/").endswith("/v1"):
         api_base = api_base.rstrip("/") + "/v1"
 
+    cache_section = raw.get("cache") or {}
+    if not isinstance(cache_section, dict):
+        cache_section = {}
+
     return AppConfig(
         host=str(raw.get("host", DEFAULT_HOST)),
         port=int(raw.get("port", DEFAULT_PORT)),
@@ -89,6 +98,8 @@ def load_config() -> AppConfig:
         api_base=api_base,
         api_key=api_key,
         model=str(ai_section.get("model", DEFAULT_MODEL)),
+        cache_enabled=bool(cache_section.get("enabled", True)),
+        cache_ttl_days=int(cache_section.get("ttl_days", 30)),
     )
 
 
@@ -656,6 +667,123 @@ async def _transcribe_audio(
     return joined
 
 
+# ── Transcript cache ──────────────────────────────────────────────
+
+CACHE_DB_PATH = Path(__file__).with_name("transcript_cache.db")
+
+
+def _get_cache_db() -> sqlite3.Connection:
+    """Open (or create) the SQLite cache DB with WAL mode and required schema."""
+    conn = sqlite3.connect(str(CACHE_DB_PATH), check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS transcript_cache (
+            video_id    TEXT PRIMARY KEY,
+            url         TEXT NOT NULL,
+            text        TEXT NOT NULL,
+            source      TEXT NOT NULL,
+            model       TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transcript_cache_created_at "
+        "ON transcript_cache(created_at)"
+    )
+    conn.commit()
+    return conn
+
+
+async def _extract_video_id(url: str) -> str:
+    """Extract a stable video identifier from a URL.
+
+    1. Try yt-dlp --print id (authoritative for any supported site).
+    2. Fall back to regex extraction for YouTube URLs.
+    3. Fall back to a SHA-256 hash of the URL for opaque identifiers.
+    """
+    import re
+
+    try:
+        result = await _run_ytdlp(["--print", "id", url], timeout=15)
+        video_id = result.strip()
+        if video_id:
+            return video_id
+    except HTTPException as exc:
+        _debug("cache", f"yt-dlp id lookup failed: {exc.detail}")
+
+    yt_re = re.compile(
+        r"(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|"
+        r"youtube\.com/shorts/)([A-Za-z0-9_-]{11})"
+    )
+    m = yt_re.search(url)
+    if m:
+        return m.group(1)
+
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
+def _cache_get(video_id: str, ttl_days: int) -> dict | None:
+    """Return a cached transcript if present and within TTL, else None."""
+    conn = _get_cache_db()
+    try:
+        cur = conn.execute(
+            "SELECT text, source, model, created_at FROM transcript_cache "
+            "WHERE video_id = ?",
+            (video_id,),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return None
+
+    text, source, model, created_at = row
+    try:
+        created_dt = datetime.fromisoformat(created_at)
+    except ValueError:
+        return None
+    now = datetime.now(timezone.utc)
+    # SQLite datetime('now') returns UTC when used unqualified, but treat
+    # naive values as UTC defensively.
+    if created_dt.tzinfo is None:
+        created_dt = created_dt.replace(tzinfo=timezone.utc)
+    if created_dt + timedelta(days=ttl_days) < now:
+        return None
+
+    return {"text": text, "source": source, "model": model}
+
+
+def _cache_put(
+    video_id: str,
+    url: str,
+    text: str,
+    source: str,
+    model: str,
+    ttl_days: int,
+) -> None:
+    """Insert or replace a cached transcript and prune expired rows."""
+    conn = _get_cache_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO transcript_cache "
+            "(video_id, url, text, source, model, created_at) "
+            "VALUES (?, ?, ?, ?, ?, datetime('now'))",
+            (video_id, url, text, source, model),
+        )
+        conn.execute(
+            "DELETE FROM transcript_cache "
+            "WHERE datetime(created_at, '+' || ? || ' days') < datetime('now')",
+            (ttl_days,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ── Endpoints ───────────────────────────────────────────────────
 
 
@@ -677,6 +805,21 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
     language = (req.language or "").strip()
 
     _debug("transcript", f"Processing: {url} [lang={language}]")
+
+    # ── Cache lookup ─────────────────────────────────────────
+    video_id: str | None = None
+    if config.cache_enabled:
+        video_id = await _extract_video_id(url)
+        cached = _cache_get(video_id, config.cache_ttl_days)
+        if cached:
+            _debug("cache", f"hit video_id={video_id} source={cached['source']}")
+            return {
+                "text": cached["text"],
+                "source": cached["source"],
+                "model": cached["model"],
+                "error": None,
+            }
+        _debug("cache", f"miss video_id={video_id}")
 
     # ── Try subtitles first ──────────────────────────────────
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -733,6 +876,9 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
         if sub_path and os.path.isfile(sub_path):
             text = _parse_subtitle_text(sub_path)
             _debug("transcript", f"Extracted {len(text)} chars from subtitles")
+            if config.cache_enabled and video_id is not None:
+                _cache_put(video_id, url, text, "subtitles", "yt-dlp", config.cache_ttl_days)
+                _debug("cache", f"stored video_id={video_id} source=subtitles")
             return {
                 "text": text,
                 "source": "subtitles",
@@ -783,6 +929,10 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
             text = await _transcribe_audio(audio_path, config, model)
         except HTTPException:
             raise
+
+        if config.cache_enabled and video_id is not None:
+            _cache_put(video_id, url, text, "transcription", model, config.cache_ttl_days)
+            _debug("cache", f"stored video_id={video_id} source=transcription")
 
         return {
             "text": text,
