@@ -94,7 +94,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.11")
+app = FastAPI(title="YT2TXT", version="0.0.12")
 
 
 # ── Request logging ─────────────────────────────────────────────
@@ -403,6 +403,7 @@ async def _download_subs_auto(
 MAX_AUDIO_BYTES = 24 * 1024 * 1024  # OpenAI 25MB limit, leave 1MB for multipart overhead
 MAX_AUDIO_DURATION = 1300          # seconds — under OpenAI's 1400s limit per request
 CHUNK_DURATION_SECONDS = 20 * 60   # ~20 minutes per chunk at 64kbps ≈ 10MB
+CHUNK_OVERLAP_SECONDS = 10         # overlap between chunks to avoid word-boundary cuts
 
 AUDIO_BITRATE_BPS = 64_000         # matches yt-dlp --postprocessor-args 64k
 
@@ -523,6 +524,36 @@ async def _transcribe_file(
     raise last_exc
 
 
+def _deduplicate_overlap(text_a: str, text_b: str, max_overlap: int = 300) -> str:
+    """Remove overlapping text at the boundary between two chunk transcriptions.
+
+    When chunks overlap in audio, adjacent transcriptions contain duplicate
+    text at the boundary.  Finds the longest suffix of *text_a* that also
+    appears as a prefix of *text_b* and returns *text_b* with the overlap
+    trimmed.  If no overlap is detected the original text is returned.
+
+    *max_overlap* is the maximum number of characters to compare (controls
+    how aggressively we search for overlaps).
+    """
+    if not text_a or not text_b:
+        return text_b
+    suffix = text_a[-max_overlap:]
+    prefix = text_b[:max_overlap * 2]
+    for i in range(len(suffix)):
+        candidate = suffix[i:]
+        if len(candidate) < 5:  # too short to be a meaningful overlap
+            break
+        if prefix.startswith(candidate):
+            trimmed = text_b[len(candidate):]
+            _debug(
+                "chunk",
+                f"Dedup overlap: removed {len(candidate)} chars "
+                f"('{candidate[:50]}...')",
+            )
+            return trimmed
+    return text_b
+
+
 async def _transcribe_audio(
     audio_path: str, config: AppConfig, model: str
 ) -> str:
@@ -548,51 +579,72 @@ async def _transcribe_audio(
     chunks_dir = os.path.join(os.path.dirname(audio_path), "chunks")
     os.makedirs(chunks_dir, exist_ok=True)
 
-    # Split into chunks of ~CHUNK_DURATION_SECONDS each
-    chunk_pattern = os.path.join(chunks_dir, "chunk_%03d.mp3")
-    proc = None
-    try:
+    # Split into overlapping chunks so no word is cut at a boundary.
+    # Each chunk covers CHUNK_DURATION_SECONDS of audio; adjacent chunks
+    # share CHUNK_OVERLAP_SECONDS.  Transcription text is deduplicated
+    # afterward to remove the repeated overlap region.
+    num_chunks = max(2, int(duration // CHUNK_DURATION_SECONDS)
+                     + (1 if duration % CHUNK_DURATION_SECONDS > 0 else 0))
+
+    chunk_paths: list[str] = []
+    for i in range(num_chunks):
+        start = max(0.0, i * CHUNK_DURATION_SECONDS
+                    - (CHUNK_OVERLAP_SECONDS if i > 0 else 0))
+        end = min(duration,
+                  (i + 1) * CHUNK_DURATION_SECONDS + CHUNK_OVERLAP_SECONDS)
+        chunk_path = os.path.join(chunks_dir, f"chunk_{i:03d}.mp3")
         proc = await asyncio.create_subprocess_exec(
             ffmpeg,
             "-y",
             "-i", audio_path,
-            "-f", "segment",
-            "-segment_time", str(CHUNK_DURATION_SECONDS),
+            "-ss", str(start),
+            "-to", str(end),
             "-c", "copy",
-            chunk_pattern,
+            chunk_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        try:
+            _stdout, _stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=60
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise HTTPException(
+                status_code=504,
+                detail=f"Timed out creating chunk {i}",
+            )
         if proc.returncode != 0:
-            err = stderr.decode("utf-8", errors="replace")[:300]
+            err = _stderr.decode("utf-8", errors="replace")[:300]
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to split audio: {err}",
+                detail=f"Failed to create chunk {i}: {err}",
             )
-    except asyncio.TimeoutError:
-        if proc:
-            proc.kill()
-        raise HTTPException(status_code=504, detail="Audio splitting timed out")
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=500,
-            detail="ffmpeg is not installed. Required for splitting long audio files.",
-        )
+        chunk_paths.append(chunk_path)
 
-    chunks = sorted(
-        [os.path.join(chunks_dir, f) for f in os.listdir(chunks_dir) if f.endswith(".mp3")]
+    _debug(
+        "transcribe",
+        f"Split into {len(chunk_paths)} overlapping chunks "
+        f"({CHUNK_OVERLAP_SECONDS}s overlap)",
     )
-    _debug("transcribe", f"Split into {len(chunks)} chunks")
 
     texts: list[str] = []
-    for i, chunk_path in enumerate(chunks):
-        _debug("transcribe", f"Transcribing chunk {i + 1}/{len(chunks)}")
-        text = await _transcribe_file(chunk_path, config, model, f"chunk {i + 1}/{len(chunks)}")
+    for i, chunk_path in enumerate(chunk_paths):
+        _debug("transcribe", f"Transcribing chunk {i + 1}/{len(chunk_paths)}")
+        text = await _transcribe_file(
+            chunk_path, config, model, f"chunk {i + 1}/{len(chunk_paths)}"
+        )
         texts.append(text)
 
-    joined = "\n\n".join(texts)
-    _debug("transcribe", f"Joined {len(chunks)} chunks → {len(joined)} chars")
+    # Deduplicate overlap text at boundaries between adjacent chunks.
+    joined = texts[0]
+    for i in range(1, len(texts)):
+        deduped = _deduplicate_overlap(texts[i - 1], texts[i])
+        joined += "\n" + deduped
+    _debug(
+        "transcribe",
+        f"Joined {len(chunk_paths)} chunks → {len(joined)} chars (deduped)",
+    )
     return joined
 
 
