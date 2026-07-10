@@ -305,41 +305,39 @@ async function loadTranslatePromptForLanguage() {
 }
 
 // ── Path autocomplete (via textkit backend) ────────────────────
+let _pathDebounceTimer = null;
+
+function loadPathSuggestions() {
+  // Initial load: fetch root-level paths from backend
+  fetchPathSuggestions('');
+}
+
 async function fetchPathSuggestions(prefix) {
   try {
     const host = textkitHostInput.value.trim() || 'localhost';
     const port = parseInt(textkitPortInput.value, 10) || 8765;
     const resp = await fetch(`http://${host}:${port}/paths?prefix=${encodeURIComponent(prefix)}`);
-    if (resp.ok) {
-      const data = await resp.json();
-      return data.paths || [];
-    }
-  } catch {}
-  return [];
-}
-
-function updatePathSuggestions(value) {
-  const datalist = tl2PathSuggestions;
-  if (!datalist) return;
-  // Show suggestions inline while typing, full list when empty
-  fetchPathSuggestions(value).then((paths) => {
-    datalist.innerHTML = '';
-    for (const p of paths.slice(0, 20)) {
-      const opt = document.createElement('option');
-      opt.value = p;
-      datalist.appendChild(opt);
-    }
-  });
-}
-
-async function loadPathSuggestions() {
-  const paths = await fetchPathSuggestions('');
-  tl2PathSuggestions.innerHTML = '';
-  for (const p of paths.slice(0, 20)) {
-    const opt = document.createElement('option');
-    opt.value = p;
-    tl2PathSuggestions.appendChild(opt);
+    const data = await resp.json().catch(() => ({}));
+    const paths = data.paths || [];
+    // If user typed a ~ prefix, prepend ~/ so the browser's <datalist>
+    // filtering matches. The backend returns paths relative to save_root;
+    // we only need to restore the tilde the user typed.
+    const tildePrefix = prefix.startsWith('~/') ? '~/' : (prefix === '~' ? '~/' : '');
+    tl2PathSuggestions.replaceChildren(...paths.map((path) => {
+      const option = document.createElement('option');
+      option.value = tildePrefix + path;
+      return option;
+    }));
+  } catch {
+    // Backend unreachable — keep existing suggestions
   }
+}
+
+function updatePathSuggestions(current) {
+  if (!current) return;
+  // Debounce: fetch real filesystem paths after typing stops
+  clearTimeout(_pathDebounceTimer);
+  _pathDebounceTimer = setTimeout(() => fetchPathSuggestions(current), 300);
 }
 
 // ── State sync ─────────────────────────────────────────────────
