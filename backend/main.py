@@ -105,7 +105,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.19")
+app = FastAPI(title="YT2TXT", version="0.0.20")
 
 
 # ── Request logging ─────────────────────────────────────────────
@@ -655,6 +655,22 @@ async def _transcribe_audio(
             chunk_path, config, model, f"chunk {i + 1}/{len(chunk_paths)}"
         )
         texts.append(text)
+
+    # Debug: save last chunk's audio and transcription for inspection.
+    try:
+        shutil.copy2(chunk_paths[-1], "/tmp/last_chunk_audio.mp3")
+        _debug("transcribe", f"Saved last chunk audio to /tmp/last_chunk_audio.mp3")
+    except Exception as exc:
+        import sys
+        print(f"Failed to save last chunk audio: {exc}", file=sys.stderr)
+
+    try:
+        with open("/tmp/last_chunk_transcription.txt", "w") as f:
+            f.write(texts[-1])
+        _debug("transcribe", f"Saved last chunk transcription to /tmp/last_chunk_transcription.txt")
+    except Exception as exc:
+        import sys
+        print(f"Failed to save last chunk transcription: {exc}", file=sys.stderr)
 
     # Deduplicate overlap text at boundaries between adjacent chunks.
     joined = texts[0]
