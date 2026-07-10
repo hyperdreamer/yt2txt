@@ -87,7 +87,10 @@ tl2Language.addEventListener('change', () => {
 tl2AutocopyCheckbox.addEventListener('change', saveTl2Settings);
 tl2AutosaveCheckbox.addEventListener('change', saveTl2Settings);
 tl2AutotranslateCheckbox.addEventListener('change', saveTl2Settings);
-tl2AutosavePath.addEventListener('input', saveTl2Settings);
+tl2AutosavePath.addEventListener('input', () => {
+  saveTl2Settings();
+  updatePathSuggestions(tl2AutosavePath.value);
+});
 translatePrompt.addEventListener('input', saveTranslatePrompt);
 
 // TextKit backend
@@ -225,6 +228,7 @@ async function init() {
 
   // Load translation prompt for current language
   await loadTranslatePromptForLanguage();
+  loadPathSuggestions();
 
   updateResultButtons();
   updateTranslationButtons();
@@ -284,6 +288,44 @@ async function loadTranslatePromptForLanguage() {
   // Fallback to local storage
   const stored = await chrome.storage.local.get([`translatePrompt:${lang}`]);
   translatePrompt.value = stored[`translatePrompt:${lang}`] || '';
+}
+
+// ── Path autocomplete (via textkit backend) ────────────────────
+async function fetchPathSuggestions(prefix) {
+  try {
+    const host = textkitHostInput.value.trim() || 'localhost';
+    const port = parseInt(textkitPortInput.value, 10) || 8765;
+    const resp = await fetch(`http://${host}:${port}/paths?prefix=${encodeURIComponent(prefix)}`);
+    if (resp.ok) {
+      const data = await resp.json();
+      return data.paths || [];
+    }
+  } catch {}
+  return [];
+}
+
+function updatePathSuggestions(value) {
+  const datalist = tl2PathSuggestions;
+  if (!datalist) return;
+  // Show suggestions inline while typing, full list when empty
+  fetchPathSuggestions(value).then((paths) => {
+    datalist.innerHTML = '';
+    for (const p of paths.slice(0, 20)) {
+      const opt = document.createElement('option');
+      opt.value = p;
+      datalist.appendChild(opt);
+    }
+  });
+}
+
+async function loadPathSuggestions() {
+  const paths = await fetchPathSuggestions('');
+  tl2PathSuggestions.innerHTML = '';
+  for (const p of paths.slice(0, 20)) {
+    const opt = document.createElement('option');
+    opt.value = p;
+    tl2PathSuggestions.appendChild(opt);
+  }
 }
 
 // ── State sync ─────────────────────────────────────────────────
