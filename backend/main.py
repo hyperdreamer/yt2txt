@@ -465,7 +465,7 @@ async def _get_audio_duration(audio_path: str) -> float:
 
 
 async def _transcribe_file(
-    audio_path: str, config: AppConfig, model: str, chunk_label: str = ""
+    audio_path: str, config: AppConfig, model: str, chunk_label: str = "", language: str = ""
 ) -> str:
     """Send a single audio file to OpenAI /v1/audio/transcriptions and return text."""
     if not config.api_key:
@@ -494,10 +494,13 @@ async def _transcribe_file(
 
     boundary = os.urandom(16).hex()
     body = b""
-    for field_name, field_value in [
+    fields: list[tuple[str, str]] = [
         ("model", safe_model),
         ("response_format", "text"),
-    ]:
+    ]
+    if language:
+        fields.append(("language", language))
+    for field_name, field_value in fields:
         body += f"--{boundary}\r\n".encode()
         body += f'Content-Disposition: form-data; name="{field_name}"\r\n\r\n'.encode()
         body += f"{field_value}\r\n".encode()
@@ -599,7 +602,7 @@ def _deduplicate_overlap(text_a: str, text_b: str, max_overlap: int = 300) -> st
     return text_b
 
 
-async def _transcribe_audio(audio_path: str, config: AppConfig, model: str) -> str:
+async def _transcribe_audio(audio_path: str, config: AppConfig, model: str, language: str = "") -> str:
     """Transcribe audio, chunking if file exceeds OpenAI's 25MB limit or 1400s duration.
 
     If the file is ≤24MB and ≤1300s, transcribes directly.
@@ -613,7 +616,7 @@ async def _transcribe_audio(audio_path: str, config: AppConfig, model: str) -> s
             "transcribe",
             f"File {file_size / 1024 / 1024:.1f}MB, {duration:.0f}s — direct",
         )
-        return await _transcribe_file(audio_path, config, model)
+        return await _transcribe_file(audio_path, config, model, language=language)
 
     reason = "size" if file_size > MAX_AUDIO_BYTES else "duration"
     _debug(
@@ -697,7 +700,7 @@ async def _transcribe_audio(audio_path: str, config: AppConfig, model: str) -> s
     for i, chunk_path in enumerate(chunk_paths):
         _debug("transcribe", f"Transcribing chunk {i + 1}/{len(chunk_paths)}")
         text = await _transcribe_file(
-            chunk_path, config, model, f"chunk {i + 1}/{len(chunk_paths)}"
+            chunk_path, config, model, f"chunk {i + 1}/{len(chunk_paths)}", language=language
         )
         texts.append(text)
 
@@ -1006,7 +1009,7 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
 
         _debug("transcript", f"Transcribing audio: {audio_path} with model {model}")
         try:
-            text = await _transcribe_audio(audio_path, config, model)
+            text = await _transcribe_audio(audio_path, config, model, language=language)
         except HTTPException:
             raise
 
