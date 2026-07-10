@@ -53,6 +53,40 @@
       border-bottom-color: #38bdf8;
     }
 
+    .backend-settings {
+      margin-bottom: 10px;
+    }
+    .backend-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .backend-row:last-child { margin-bottom: 0; }
+    .backend-row .row-label {
+      font-size: 11px;
+      color: #64748b;
+      text-transform: uppercase;
+      min-width: 52px;
+      line-height: 24px;
+    }
+    .backend-row label {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: #94a3b8;
+    }
+    .backend-row input {
+      padding: 4px 6px;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      background: #1e293b;
+      color: #e2e8f0;
+      font-size: 12px;
+      width: 90px;
+    }
+    .backend-row input:focus { border-color: #38bdf8; outline: none; }
+
     .settings {
       display: flex;
       gap: 8px;
@@ -94,10 +128,7 @@
       color: #e2e8f0;
       font-size: 12px;
     }
-    #url:focus {
-      border-color: #38bdf8;
-      outline: none;
-    }
+    #url:focus { border-color: #38bdf8; outline: none; }
 
     .actions {
       display: flex;
@@ -113,177 +144,109 @@
       cursor: pointer;
       transition: opacity 0.15s;
     }
-    button:disabled {
-      opacity: 0.4;
-      cursor: not-allowed;
-    }
-    button.primary {
-      background: #2563eb;
-      color: #fff;
-    }
-    button.primary:hover:not(:disabled) {
-      background: #1d4ed8;
-    }
-    button.danger {
-      background: #dc2626;
-      color: #fff;
-    }
-    button.danger:hover:not(:disabled) {
-      background: #b91c1c;
-    }
-    button.secondary {
-      background: #334155;
-      color: #e2e8f0;
-    }
-    button.secondary:hover:not(:disabled) {
-      background: #475569;
-    }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.primary { background: #2563eb; color: #fff; }
+    button.primary:hover:not(:disabled) { background: #1d4ed8; }
+    button.danger { background: #dc2626; color: #fff; }
+    button.danger:hover:not(:disabled) { background: #b91c1c; }
+    button.secondary { background: #334155; color: #e2e8f0; }
+    button.secondary:hover:not(:disabled) { background: #475569; }
 
     .force-label {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 11px;
-      color: #94a3b8;
-      cursor: pointer;
-      white-space: nowrap;
+      display: flex; align-items: center; gap: 4px;
+      font-size: 11px; color: #94a3b8; cursor: pointer; white-space: nowrap;
     }
     .force-label input { cursor: pointer; }
 
     .hidden { display: none !important; }
 
     .status-bar {
-      font-size: 12px;
-      color: #94a3b8;
-      margin-bottom: 10px;
-      min-height: 16px;
+      font-size: 12px; color: #94a3b8; margin-bottom: 10px; min-height: 16px;
     }
     .status-bar.error { color: #f87171; }
     .status-bar.success { color: #4ade80; }
 
     #result {
-      width: 100%;
-      height: 180px;
-      padding: 8px;
-      border: 1px solid #334155;
-      border-radius: 4px;
-      background: #1e293b;
-      color: #e2e8f0;
-      font-size: 12px;
-      line-height: 1.5;
-      resize: vertical;
-      font-family: inherit;
+      width: 100%; height: 180px; padding: 8px;
+      border: 1px solid #334155; border-radius: 4px;
+      background: #1e293b; color: #e2e8f0;
+      font-size: 12px; line-height: 1.5; resize: vertical; font-family: inherit;
     }
-    #result:focus {
-      border-color: #38bdf8;
-      outline: none;
-    }
+    #result:focus { border-color: #38bdf8; outline: none; }
 
     .result-actions {
-      display: flex;
-      gap: 6px;
-      margin-top: 8px;
+      display: flex; gap: 6px; margin-top: 8px;
     }
 
     .panel h1 {
-      font-size: 15px;
-      font-weight: 700;
-      color: #38bdf8;
-      margin-bottom: 10px;
+      font-size: 15px; font-weight: 700; color: #38bdf8; margin-bottom: 10px;
     }
 
-    .collapsible {
-      margin-bottom: 10px;
-    }
+    .collapsible { margin-bottom: 10px; }
     .collapsible summary {
-      color: #94a3b8;
-      font-size: 11px;
-      text-transform: uppercase;
-      cursor: pointer;
-      padding: 4px 0;
+      color: #94a3b8; font-size: 11px; text-transform: uppercase;
+      cursor: pointer; padding: 4px 0;
     }
 
     .option-row {
-      display: flex;
-      gap: 12px;
-      margin-bottom: 8px;
-      flex-wrap: wrap;
+      display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap;
     }
-    .option-row label {
-      color: #94a3b8;
-      font-size: 12px;
-      cursor: pointer;
-      white-space: nowrap;
-    }
+    .option-row label { color: #94a3b8; font-size: 12px; cursor: pointer; white-space: nowrap; }
     .option-row input { cursor: pointer; }
 
-    /* Format/Translation result textareas */
-    #fmt-result, #tl2-result {
-      width: 100%;
-      min-height: 140px;
-      padding: 8px;
-      border: 1px solid #334155;
-      border-radius: 4px;
-      background: #1e293b;
-      color: #e2e8f0;
-      font-size: 12px;
-      line-height: 1.5;
-      resize: vertical;
-      font-family: inherit;
+    /* Full-width save path */
+    .save-path-label {
+      display: block; color: #94a3b8; font-size: 11px; margin-bottom: 8px;
+    }
+    .save-path-label span { display: block; margin-bottom: 2px; }
+    .save-path-label input {
+      box-sizing: border-box; width: 100%; padding: 5px 7px;
+      border: 1px solid #334155; border-radius: 5px;
+      background: #1e293b; color: #e2e8f0; font-size: 12px;
+    }
+    .save-path-label input:focus { border-color: #38bdf8; outline: none; }
+
+    /* Translation result textarea */
+    #tl2-result {
+      width: 100%; min-height: 140px; padding: 8px;
+      border: 1px solid #334155; border-radius: 4px;
+      background: #1e293b; color: #e2e8f0;
+      font-size: 12px; line-height: 1.5; resize: vertical; font-family: inherit;
       margin-bottom: 10px;
     }
-    #fmt-result:focus, #tl2-result:focus {
-      border-color: #38bdf8;
-      outline: none;
-    }
+    #tl2-result:focus { border-color: #38bdf8; outline: none; }
 
     /* ── Light theme ──────────────────────────────────────── */
     @media (prefers-color-scheme: light) {
-      body {
-        background: #f8fafc;
-        color: #0f172a;
-      }
+      body { background: #f8fafc; color: #0f172a; }
       .header h1 { color: #0284c7; }
       .header .version { color: #94a3b8; }
 
-      .tab-bar {
-        border-bottom-color: #cbd5e1;
-        background: #f8fafc;
-      }
+      .tab-bar { border-bottom-color: #cbd5e1; background: #f8fafc; }
       .tab { color: #64748b; }
       .tab.active { color: #0284c7; border-bottom-color: #0284c7; }
+
+      .backend-row input {
+        border-color: #cbd5e1; background: #ffffff; color: #0f172a;
+      }
+      .backend-row input:focus { border-color: #0284c7; }
 
       .panel h1 { color: #0284c7; }
 
       .settings label { color: #64748b; }
       .settings input, .settings select {
-        border-color: #cbd5e1;
-        background: #ffffff;
-        color: #0f172a;
+        border-color: #cbd5e1; background: #ffffff; color: #0f172a;
       }
       .settings input:focus, .settings select:focus { border-color: #0284c7; }
 
-      #url {
-        border-color: #cbd5e1;
-        background: #ffffff;
-        color: #0f172a;
-      }
+      #url { border-color: #cbd5e1; background: #ffffff; color: #0f172a; }
       #url:focus { border-color: #0284c7; }
 
-      button.primary {
-        background: #0284c7;
-        color: #fff;
-      }
+      button.primary { background: #0284c7; color: #fff; }
       button.primary:hover:not(:disabled) { background: #0369a1; }
-      button.danger {
-        background: #dc2626;
-        color: #fff;
-      }
+      button.danger { background: #dc2626; color: #fff; }
       button.danger:hover:not(:disabled) { background: #b91c1c; }
-      button.secondary {
-        background: #e2e8f0;
-        color: #334155;
-      }
+      button.secondary { background: #e2e8f0; color: #334155; }
       button.secondary:hover:not(:disabled) { background: #cbd5e1; }
 
       .status-bar { color: #64748b; }
@@ -293,39 +256,48 @@
       .collapsible summary { color: #64748b; }
       .option-row label { color: #334155; }
 
-      #result, #fmt-result, #tl2-result {
-        border-color: #cbd5e1;
-        background: #ffffff;
-        color: #0f172a;
+      #result, #tl2-result {
+        border-color: #cbd5e1; background: #ffffff; color: #0f172a;
       }
-      #result:focus, #fmt-result:focus, #tl2-result:focus { border-color: #0284c7; }
+      #result:focus, #tl2-result:focus { border-color: #0284c7; }
 
       #format-prompt, #translate-prompt {
-        background: #ffffff;
-        color: #0f172a;
-        border-color: #cbd5e1;
+        background: #ffffff; color: #0f172a; border-color: #cbd5e1;
       }
       #format-prompt:focus, #translate-prompt:focus { border-color: #0284c7; }
+
+      .save-path-label { color: #64748b; }
+      .save-path-label input {
+        border-color: #cbd5e1; background: #ffffff; color: #0f172a;
+      }
+      .save-path-label input:focus { border-color: #0284c7; }
+
+      .force-label { color: #64748b; }
     }
   </style>
 </head>
 <body>
   <div class="header">
     <h1>YT2TXT</h1>
-    <span class="version">v0.0.17</span>
+    <span class="version">v0.0.18</span>
   </div>
 
   <div class="tab-bar">
     <button class="tab active" data-panel="transcript-panel">Transcript</button>
-    <button class="tab" data-panel="format-panel">Format</button>
     <button class="tab" data-panel="translation-panel">Translation</button>
   </div>
 
-  <div class="settings" style="margin-bottom:10px">
-    <label>YT2TXT Host <input id="host" type="text" placeholder="localhost"></label>
-    <label>YT2TXT Port <input id="port" type="number" placeholder="8666"></label>
-    <label>TextKit Host <input id="textkit-host" type="text" placeholder="localhost"></label>
-    <label>TextKit Port <input id="textkit-port" type="number" placeholder="8765"></label>
+  <div class="backend-settings">
+    <div class="backend-row">
+      <span class="row-label">YT2TXT</span>
+      <label>Host <input id="host" type="text" placeholder="localhost"></label>
+      <label>Port <input id="port" type="number" placeholder="8666"></label>
+    </div>
+    <div class="backend-row">
+      <span class="row-label">TextKit</span>
+      <label>Host <input id="textkit-host" type="text" placeholder="localhost"></label>
+      <label>Port <input id="textkit-port" type="number" placeholder="8765"></label>
+    </div>
   </div>
 
   <div id="transcript-panel" class="panel">
@@ -367,41 +339,19 @@
       <button id="copy" class="secondary" disabled>Copy</button>
       <button id="download" class="secondary" disabled>Download</button>
     </div>
-  </div>
 
-  <div id="format-panel" class="panel hidden">
-    <h1>Format</h1>
-    <div class="settings">
-      <label>Source
-        <select id="fmt-source">
-          <option value="transcript">Transcript</option>
-          <option value="translation">Translation</option>
-        </select>
-      </label>
-    </div>
-    <details class="collapsible">
-      <summary>Format Prompt</summary>
-      <textarea id="format-prompt" placeholder="Custom formatting prompt. E.g.: Reformat this text as clean Markdown with headings and bullet points." style="width:100%;min-height:80px;box-sizing:border-box;padding:6px;border:1px solid #334155;border-radius:4px;background:#1e293b;color:#e2e8f0;font-size:12px;resize:vertical;font-family:inherit;"></textarea>
-    </details>
-    <div id="fmt-status-bar" class="status-bar">Ready</div>
-    <textarea id="fmt-result" readonly placeholder="Formatted text will appear here..."></textarea>
-    <div class="option-row">
-      <label><input id="fmt-autocopy" type="checkbox"> Auto-copy</label>
-      <label><input id="fmt-autosave" type="checkbox"> Auto-save</label>
-      <label><input id="fmt-autoformat" type="checkbox"> Auto-format</label>
-    </div>
-    <div class="settings">
-      <label>Save path
+    <details class="collapsible" style="margin-top:10px">
+      <summary>Auto-Format</summary>
+      <textarea id="format-prompt" placeholder="Custom formatting prompt. E.g.: Reformat as clean Markdown with headings and bullet points." style="width:100%;min-height:60px;box-sizing:border-box;padding:6px;border:1px solid #334155;border-radius:4px;background:#1e293b;color:#e2e8f0;font-size:12px;resize:vertical;font-family:inherit;margin-bottom:8px;"></textarea>
+      <div class="option-row">
+        <label><input id="fmt-autoformat" type="checkbox"> Auto-format after transcript/translation</label>
+      </div>
+      <div class="save-path-label">
+        <span>Save path</span>
         <input id="fmt-save-path" type="text" placeholder="e.g. transcripts/formatted.md" list="fmt-path-suggestions">
         <datalist id="fmt-path-suggestions"></datalist>
-      </label>
-    </div>
-    <div class="actions">
-      <button id="fmt-format" class="primary">Format</button>
-      <button id="fmt-copy" class="secondary" disabled>Copy</button>
-      <button id="fmt-save" class="secondary" disabled>Save</button>
-      <button id="fmt-download" class="secondary" disabled>Download</button>
-    </div>
+      </div>
+    </details>
   </div>
 
   <div id="translation-panel" class="panel hidden">
@@ -431,11 +381,10 @@
       <label><input id="tl2-autosave" type="checkbox"> Auto-save</label>
       <label><input id="tl2-autotranslate" type="checkbox"> Auto-translate</label>
     </div>
-    <div class="settings">
-      <label>Save path
-        <input id="tl2-autosave-path" type="text" placeholder="e.g. transcripts/translated.txt" list="tl2-path-suggestions">
-        <datalist id="tl2-path-suggestions"></datalist>
-      </label>
+    <div class="save-path-label">
+      <span>Save path</span>
+      <input id="tl2-autosave-path" type="text" placeholder="e.g. transcripts/translated.txt" list="tl2-path-suggestions">
+      <datalist id="tl2-path-suggestions"></datalist>
     </div>
     <div class="actions">
       <button id="tl2-translate" class="primary" disabled>Translate</button>

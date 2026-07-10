@@ -2,7 +2,6 @@
 const tabs = document.querySelectorAll('.tab');
 const panels = {
   'transcript-panel': document.getElementById('transcript-panel'),
-  'format-panel': document.getElementById('format-panel'),
   'translation-panel': document.getElementById('translation-panel'),
 };
 
@@ -19,17 +18,8 @@ const portInput = document.getElementById('port');
 const langSelect = document.getElementById('lang');
 const forceCheckbox = document.getElementById('force');
 
-// ── Format panel elements ─────────────────────────────────────
-const fmtSource = document.getElementById('fmt-source');
+// ── Auto-format config elements ────────────────────────────────
 const formatPrompt = document.getElementById('format-prompt');
-const fmtStatusBar = document.getElementById('fmt-status-bar');
-const fmtResult = document.getElementById('fmt-result');
-const fmtFormat = document.getElementById('fmt-format');
-const fmtCopy = document.getElementById('fmt-copy');
-const fmtSave = document.getElementById('fmt-save');
-const fmtDownload = document.getElementById('fmt-download');
-const fmtAutocopy = document.getElementById('fmt-autocopy');
-const fmtAutosave = document.getElementById('fmt-autosave');
 const fmtAutoformat = document.getElementById('fmt-autoformat');
 const fmtSavePath = document.getElementById('fmt-save-path');
 const fmtPathSuggestions = document.getElementById('fmt-path-suggestions');
@@ -73,7 +63,6 @@ document.addEventListener('DOMContentLoaded', () => {
   init().catch((e) => {
     statusBar.textContent = `Init failed: ${e.message}`;
     statusBar.className = 'status-bar error';
-    setFmtProgress(`Init failed: ${e.message}`);
     setTl2Progress(`Init failed: ${e.message}`);
   });
 });
@@ -90,22 +79,11 @@ resultEl.addEventListener('input', () => {
   userEditedResult = true;
   updateResultButtons();
   updateTranslationButtons();
-  updateFormatButtons();
 });
 
-// Format panel
-fmtFormat.addEventListener('click', doFormat);
-fmtCopy.addEventListener('click', () => copyResult(fmtResult, fmtCopy));
-fmtDownload.addEventListener('click', () => downloadAsFile(fmtResult.value.trim(), 'format'));
-fmtSave.addEventListener('click', saveFormatResult);
+// Auto-format config
 formatPrompt.addEventListener('input', saveFormatPrompt);
-fmtAutocopy.addEventListener('change', saveFormatSettings);
-fmtAutosave.addEventListener('change', saveFormatSettings);
 fmtAutoformat.addEventListener('change', saveFormatSettings);
-fmtSource.addEventListener('change', () => {
-  saveFormatSettings();
-  updateFormatButtons();
-});
 fmtSavePath.addEventListener('input', saveFormatSettings);
 
 // Translation panel
@@ -164,36 +142,6 @@ chrome.runtime.onMessage.addListener((message) => {
     }
     return;
   }
-  if (message?.type === 'format:update') {
-    if (message.tabId !== currentTabId) return;
-    if (message.text) {
-      fmtResult.value = message.text;
-      chrome.storage.local.set({ [`fmtResult:${currentTabId}`]: message.text });
-    } else if (message.error) {
-      // Error path: keep any existing result visible
-    }
-    fmtCopy.disabled = fmtSave.disabled = fmtDownload.disabled = !message.text;
-    fmtFormat.textContent = 'Format';
-    fmtFormat.classList.remove('danger');
-    chrome.storage.local.remove(`fmtFormatting:${currentTabId}`);
-    setFmtProgress(message.text ? 'Formatting complete.' : (message.error || 'Formatting failed.'));
-    updateFormatButtons();
-    return;
-  }
-  if (message?.type === 'fmt:formatting') {
-    if (message.tabId !== currentTabId) return;
-    if (message.value) {
-      fmtFormat.textContent = 'Stop';
-      fmtFormat.classList.add('danger');
-      fmtCopy.disabled = fmtSave.disabled = fmtDownload.disabled = true;
-      setFmtProgress('Formatting...');
-    } else {
-      fmtFormat.textContent = 'Format';
-      fmtFormat.classList.remove('danger');
-      updateFormatButtons();
-    }
-    return;
-  }
 });
 
 // ── Init ───────────────────────────────────────────────────────
@@ -212,11 +160,8 @@ async function init() {
     tl2AutoSave: false,
     tl2AutoSavePath: '',
     yt2txtAutoTranslate: false,
-    fmtAutoCopy: false,
-    fmtAutoSave: false,
     fmtAutoFormat: false,
     fmtSavePath: '',
-    fmtSourceVal: 'transcript',
   });
 
   // Auto-fill TextKit host from yt2txt host if empty (common single-machine case)
@@ -233,11 +178,8 @@ async function init() {
   tl2AutosavePath.value = items.tl2AutoSavePath;
   tl2AutotranslateCheckbox.checked = items.yt2txtAutoTranslate;
 
-  fmtAutocopy.checked = items.fmtAutoCopy;
-  fmtAutosave.checked = items.fmtAutoSave;
   fmtAutoformat.checked = items.fmtAutoFormat;
   fmtSavePath.value = items.fmtSavePath;
-  fmtSource.value = items.fmtSourceVal || 'transcript';
 
   // Pre-fill URL from current tab
   if (tab?.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('about:')) {
@@ -274,9 +216,6 @@ async function init() {
       `tl2Language:${currentTabId}`,
       `tl2Status:${currentTabId}`,
       `tl2Translating:${currentTabId}`,
-      `fmtResult:${currentTabId}`,
-      `fmtStatus:${currentTabId}`,
-      `fmtFormatting:${currentTabId}`,
     ];
     const tl2Stored = await chrome.storage.local.get(tl2Keys);
     if (tl2Stored[`tl2Language:${currentTabId}`]) {
@@ -287,12 +226,6 @@ async function init() {
     }
     if (tl2Stored[`tl2Status:${currentTabId}`]) {
       setTl2Progress(tl2Stored[`tl2Status:${currentTabId}`]);
-    }
-    if (tl2Stored[`fmtResult:${currentTabId}`]) {
-      fmtResult.value = tl2Stored[`fmtResult:${currentTabId}`];
-    }
-    if (tl2Stored[`fmtStatus:${currentTabId}`]) {
-      setFmtProgress(tl2Stored[`fmtStatus:${currentTabId}`]);
     }
 
     // Restore "Stop" button state if mid-translation
@@ -308,18 +241,6 @@ async function init() {
         setTl2Progress('Translating...');
       }
     }
-    // Restore "Stop" button state if mid-formatting
-    if (tl2Stored[`fmtFormatting:${currentTabId}`]) {
-      if (fmtResult.value.trim()) {
-        chrome.storage.local.remove(`fmtFormatting:${currentTabId}`);
-        fmtFormat.textContent = 'Format';
-        fmtFormat.classList.remove('danger');
-      } else {
-        fmtFormat.textContent = 'Stop';
-        fmtFormat.classList.add('danger');
-        setFmtProgress('Formatting...');
-      }
-    }
   }
 
   // Load translation prompt for current language
@@ -327,7 +248,6 @@ async function init() {
 
   updateResultButtons();
   updateTranslationButtons();
-  updateFormatButtons();
 }
 
 // ── Settings ───────────────────────────────────────────────────
@@ -351,11 +271,8 @@ function saveTextkitBackend() {
 
 function saveFormatSettings() {
   chrome.storage.sync.set({
-    fmtAutoCopy: fmtAutocopy.checked,
-    fmtAutoSave: fmtAutosave.checked,
     fmtAutoFormat: fmtAutoformat.checked,
     fmtSavePath: fmtSavePath.value.trim(),
-    fmtSourceVal: fmtSource.value,
   });
 }
 
@@ -479,71 +396,6 @@ function downloadText() {
   URL.revokeObjectURL(url);
 }
 
-// ── Format panel actions ──────────────────────────────────────
-async function doFormat() {
-  if (fmtFormat.textContent === 'Stop') {
-    fmtFormat.disabled = true;
-    try {
-      await chrome.runtime.sendMessage({ type: 'format:stop', tabId: currentTabId });
-    } catch {
-      // Best effort
-    }
-    return;
-  }
-
-  const sourceType = fmtSource.value;
-  const sourceText = sourceType === 'transcript' ? resultEl.value.trim() : tl2Result.value.trim();
-  if (!sourceText) {
-    setFmtProgress('No source text available.');
-    return;
-  }
-  const prompt = formatPrompt.value.trim();
-  if (!prompt) {
-    setFmtProgress('Enter a formatting prompt first.');
-    return;
-  }
-
-  fmtResult.value = '';
-  fmtCopy.disabled = fmtSave.disabled = fmtDownload.disabled = true;
-
-  const host = textkitHostInput.value.trim() || 'localhost';
-  const port = parseInt(textkitPortInput.value, 10) || 8765;
-
-  try {
-    await chrome.runtime.sendMessage({
-      type: 'format:start',
-      tabId: currentTabId,
-      text: sourceText,
-      prompt,
-      host,
-      port,
-    });
-  } catch {
-    // Background will broadcast status
-  }
-}
-
-async function saveFormatResult() {
-  const text = fmtResult.value.trim();
-  const path = fmtSavePath.value.trim();
-  if (!text || !path) {
-    setFmtProgress('Enter a save path first.');
-    return;
-  }
-  try {
-    const r = await chrome.runtime.sendMessage({ type: 'save:translation', text, path });
-    if (r?.ok) {
-      fmtSave.textContent = 'Saved!';
-      setTimeout(() => (fmtSave.textContent = 'Save'), 1500);
-      setFmtProgress(`Saved to ${r.path || path}`);
-    } else {
-      setFmtProgress(r?.error || 'Save failed.');
-    }
-  } catch (e) {
-    setFmtProgress(e.message || 'Save failed.');
-  }
-}
-
 // ── Translation panel actions ─────────────────────────────────
 async function doTranslation() {
   if (tl2Translate.textContent === 'Stop') {
@@ -641,17 +493,6 @@ function setTl2Progress(msg) {
   }
 }
 
-function setFmtProgress(msg) {
-  fmtStatusBar.textContent = msg;
-  fmtStatusBar.className = 'status-bar';
-  if (msg && (msg.includes('failed') || msg.includes('timed out') || msg.includes('error') || msg.includes('Error'))) {
-    fmtStatusBar.className = 'status-bar error';
-  }
-  if (msg && (msg.includes('complete') || msg.includes('Ready') || msg.includes('Saved'))) {
-    fmtStatusBar.className = 'status-bar success';
-  }
-}
-
 function updateTranslationButtons() {
   const hasSource = resultEl.value.trim().length > 0;
   const hasResult = tl2Result.value.trim().length > 0;
@@ -660,19 +501,6 @@ function updateTranslationButtons() {
   tl2Copy.disabled = !hasResult;
   tl2Save.disabled = !hasResult;
   tl2Download.disabled = !hasResult;
-}
-
-function updateFormatButtons() {
-  const sourceType = fmtSource.value;
-  const hasSource = sourceType === 'transcript'
-    ? resultEl.value.trim().length > 0
-    : tl2Result.value.trim().length > 0;
-  const hasResult = fmtResult.value.trim().length > 0;
-  const isActive = fmtFormat.textContent === 'Stop';
-  fmtFormat.disabled = isActive ? false : !hasSource;
-  fmtCopy.disabled = !hasResult;
-  fmtSave.disabled = !hasResult;
-  fmtDownload.disabled = !hasResult;
 }
 
 function updateResultButtons() {
@@ -710,5 +538,4 @@ function renderState(state) {
 
   updateResultButtons();
   updateTranslationButtons();
-  updateFormatButtons();
 }

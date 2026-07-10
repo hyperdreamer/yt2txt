@@ -105,7 +105,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.17")
+app = FastAPI(title="YT2TXT", version="0.0.18")
 
 
 # ── Request logging ─────────────────────────────────────────────
