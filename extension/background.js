@@ -359,6 +359,8 @@ async function handleStart(msg) {
 
   // Fire auto-actions after a successful transcript extraction.
   if (resultText) {
+    // Cache original transcript before formatting (for retry on format failure)
+    await chrome.storage.local.set({ [`transcript_raw:${tab.id}`]: resultText });
     try { await autoTranslate(tab.id, resultText, msg.url); } catch (e) { console.error('autoTranslate failed:', e); }
     try { await autoFormatIfEnabled(tab.id, resultText); } catch (e) { console.error('autoFormatIfEnabled failed:', e); }
   }
@@ -520,7 +522,8 @@ async function handleSaveTranslation(msg) {
 // ── Handle format start ────────────────────────────────────────
 async function handleFormatStart(msg) {
   const { tabId, text, prompt, host, port } = msg;
-  if (!tabId || !text || !prompt) return { ok: false, error: 'Missing tabId, text, or prompt' };
+  if (!tabId || !text) return { ok: false, error: 'Missing tabId or text' };
+  const fmtPrompt = prompt || 'Reformat the following text preserving all meaning. Fix punctuation, capitalization, and structure.';
 
   // Abort any in-flight formatting for this tab
   handleFormatStop(tabId);
@@ -553,7 +556,7 @@ async function handleFormatStart(msg) {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, prompt }),
+        body: JSON.stringify({ text, prompt: fmtPrompt }),
         signal: controller.signal,
       });
       const payload = await response.json().catch(() => ({}));
@@ -562,6 +565,8 @@ async function handleFormatStart(msg) {
 
       const formatted = payload.text || '';
       await chrome.storage.local.set({ [`fmtResult:${tabId}`]: formatted });
+      // Replace the transcript with formatted text
+      await chrome.storage.local.set({ [`transcript:${tabId}`]: formatted });
       chrome.runtime
         .sendMessage({ type: 'format:update', tabId, text: formatted })
         .catch(() => {});
@@ -672,8 +677,22 @@ async function autoSaveIfEnabled(text) {
 
 // ── Auto-format helper ─────────────────────────────────────────
 async function autoFormatIfEnabled(tabId, text, host, port) {
-  const prompt = await chrome.storage.local.get('formatPrompt');
-  if (!prompt.formatPrompt || !prompt.formatPrompt.trim()) return;
+  // Try to get format prompt from textkit backend, fall back to local, then default
+  let formatPrompt = '';
+  try {
+    const tkHost = host || DEFAULT_HOST;
+    const tkPort = port || DEFAULT_TEXTKIT_PORT;
+    const resp = await fetch(`http://${tkHost}:${tkPort}/prompts/format`);
+    if (resp.ok) {
+      const data = await resp.json();
+      formatPrompt = data.template || '';
+    }
+  } catch {}
+  if (!formatPrompt) {
+    const stored = await chrome.storage.local.get('formatPrompt');
+    formatPrompt = stored.formatPrompt || '';
+  }
+  if (!formatPrompt || !formatPrompt.trim()) return;
   // Fall back to sync storage if caller didn't provide host/port
   if (!host || port === undefined) {
     const backend = await chrome.storage.sync.get({
@@ -686,7 +705,7 @@ async function autoFormatIfEnabled(tabId, text, host, port) {
   handleFormatStart({
     tabId,
     text,
-    prompt: prompt.formatPrompt.trim(),
+    prompt: formatPrompt.trim(),
     host,
     port,
   }).catch((e) => console.error('autoFormatIfEnabled failed:', e));

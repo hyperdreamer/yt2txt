@@ -13,6 +13,7 @@ const statusBar = document.getElementById('status-bar');
 const resultEl = document.getElementById('result');
 const copyBtn = document.getElementById('copy');
 const downloadBtn = document.getElementById('download');
+const formatRetryBtn = document.getElementById('format-retry');
 const hostInput = document.getElementById('host');
 const portInput = document.getElementById('port');
 const langSelect = document.getElementById('lang');
@@ -66,6 +67,7 @@ startBtn.addEventListener('click', startCapture);
 stopBtn.addEventListener('click', stopCapture);
 copyBtn.addEventListener('click', copyText);
 downloadBtn.addEventListener('click', downloadText);
+formatRetryBtn.addEventListener('click', retryFormat);
 hostInput.addEventListener('change', saveYt2txtSettings);
 portInput.addEventListener('change', saveYt2txtSettings);
 langSelect.addEventListener('change', saveYt2txtSettings);
@@ -135,6 +137,24 @@ chrome.runtime.onMessage.addListener((message) => {
       tl2Translate.textContent = 'Translate';
       tl2Translate.classList.remove('danger');
       updateTranslationButtons();
+    }
+    return;
+  }
+  if (message?.type === 'format:update') {
+    if (message.tabId !== currentTabId) return;
+    if (message.text) {
+      // Format succeeded — replace transcript text
+      resultEl.value = message.text;
+      formatRetryBtn.classList.add('hidden');
+      statusBar.textContent = 'Formatted ✓';
+      statusBar.className = 'status-bar success';
+      chrome.storage.local.set({ [`transcript:${currentTabId}`]: message.text });
+    } else if (message.error) {
+      // Format failed — show retry button
+      formatRetryBtn.classList.remove('hidden');
+      formatRetryBtn.disabled = false;
+      statusBar.textContent = message.error || 'Formatting failed. Click Format to retry.';
+      statusBar.className = 'status-bar error';
     }
     return;
   }
@@ -429,6 +449,61 @@ function downloadText() {
   a.download = 'transcript.txt';
   a.click();
   URL.revokeObjectURL(url);
+}
+
+// ── Format retry (Transcript panel) ─────────────────────────────
+async function retryFormat() {
+  formatRetryBtn.disabled = true;
+  formatRetryBtn.textContent = 'Formatting...';
+  statusBar.textContent = 'Formatting...';
+  statusBar.className = 'status-bar';
+
+  const host = textkitHostInput.value.trim() || 'localhost';
+  const port = parseInt(textkitPortInput.value, 10) || 8765;
+
+  // Use cached original transcript for retry
+  const rawKey = currentTabId ? `transcript_raw:${currentTabId}` : null;
+  let text = resultEl.value.trim();
+  if (rawKey) {
+    const stored = await chrome.storage.local.get(rawKey);
+    if (stored[rawKey]) text = stored[rawKey];
+  }
+
+  if (!text) {
+    statusBar.textContent = 'No text to format.';
+    statusBar.className = 'status-bar error';
+    formatRetryBtn.disabled = false;
+    formatRetryBtn.textContent = 'Format';
+    return;
+  }
+
+  // Try loading format prompt from textkit backend first
+  let fmtPrompt = '';
+  try {
+    const resp = await fetch(`http://${host}:${port}/prompts/format`);
+    if (resp.ok) {
+      const data = await resp.json();
+      fmtPrompt = data.template || '';
+    }
+  } catch {}
+  if (!fmtPrompt) {
+    const stored = await chrome.storage.local.get('formatPrompt');
+    fmtPrompt = stored.formatPrompt || '';
+  }
+
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'format:start',
+      tabId: currentTabId,
+      text,
+      prompt: fmtPrompt,
+      host,
+      port,
+    });
+  } catch {
+    formatRetryBtn.disabled = false;
+    formatRetryBtn.textContent = 'Format';
+  }
 }
 
 // ── Translation panel actions ─────────────────────────────────
