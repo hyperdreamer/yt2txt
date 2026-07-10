@@ -15,7 +15,6 @@ const resultEl = document.getElementById('result');
 const copyBtn = document.getElementById('copy');
 const downloadBtn = document.getElementById('download');
 // ── Format panel elements ─────────────────────────────────────
-const formatSource = document.getElementById('format-source');
 const formatPrompt = document.getElementById('format-prompt');
 const formatBtn = document.getElementById('format-btn');
 const formatStatusBar = document.getElementById('format-status-bar');
@@ -49,7 +48,6 @@ const textkitPortInput = document.getElementById('textkit-port');
 let latestState = null;
 let currentTabId = null;
 let userEditedResult = false;
-let formatUserEdited = false;
 let tlUserEdited = false;
 
 // ── Tab switching ──────────────────────────────────────────────
@@ -69,23 +67,12 @@ function switchTab(panelName) {
   Object.values(panels).forEach((p) => p.classList.add('hidden'));
   if (panels[panelName]) panels[panelName].classList.remove('hidden');
 
-  // 3. Auto-fill downstream data
-  if (panelName === 'format-panel' && !formatSource.value.trim()) {
-    // Pre-fill from transcript result
-    const transcriptText = resultEl.value.trim();
-    if (transcriptText) {
-      formatSource.value = transcriptText;
-      formatBtn.disabled = false;
-    }
-  }
-
+  // 3. Auto-fill downstream data (Format tab uses transcript result implicitly)
   if (panelName === 'translation-panel' && !tl2Result.value.trim()) {
-    // Pre-fill translate source from format result, falling back to
-    // format source, falling back to transcript result.
+    // Pre-fill translate source from format result, falling back to transcript.
     const formatOutput = formatResult.value.trim();
-    const formatInput = formatSource.value.trim();
     const transcriptText = resultEl.value.trim();
-    const next = formatOutput || formatInput || transcriptText;
+    const next = formatOutput || transcriptText;
     if (next && !tl2Result.value.trim()) {
       // The legacy tl2-* flow does not have a separate "source" textarea —
       // the transcript is taken from resultEl on Translate.  No need to
@@ -112,10 +99,6 @@ downloadBtn.addEventListener('click', downloadText);
 // Format panel
 formatBtn.addEventListener('click', doFormat);
 formatCopy.addEventListener('click', () => copyResult(formatResult, formatCopy));
-formatSource.addEventListener('input', () => {
-  formatUserEdited = true;
-  formatBtn.disabled = !formatSource.value.trim();
-});
 formatPrompt.addEventListener('input', () => {
   if (currentTabId) {
     chrome.storage.local.set({ [`format:prompt:${currentTabId}`]: formatPrompt.value });
@@ -326,9 +309,9 @@ async function init() {
     if (fmtStored[`format:prompt:${currentTabId}`]) {
       formatPrompt.value = fmtStored[`format:prompt:${currentTabId}`];
     }
-    // Auto-fill format source from transcript result if empty
-    if (!formatSource.value.trim() && resultEl.value.trim()) {
-      formatSource.value = resultEl.value.trim();
+    // Format button enabled if transcript has text
+    if (resultEl.value.trim()) {
+      formatBtn.disabled = false;
     }
   }
 
@@ -554,7 +537,7 @@ async function doFormat() {
     return;
   }
 
-  const text = formatSource.value.trim();
+  const text = resultEl.value.trim();
   if (!text) {
     setFormatStatus('No text to format.');
     return;
@@ -586,7 +569,7 @@ async function doFormat() {
 function resetFormatButton() {
   formatBtn.textContent = 'Format';
   formatBtn.classList.remove('danger');
-  formatBtn.disabled = !formatSource.value.trim();
+  formatBtn.disabled = !resultEl.value.trim();
 }
 
 function setFormatStatus(msg) {
@@ -609,7 +592,7 @@ function setFormatStatus(msg) {
 }
 
 function updateFormatButtons() {
-  const hasSource = formatSource.value.trim().length > 0;
+  const hasSource = resultEl.value.trim().length > 0;
   const hasResult = formatResult.value.trim().length > 0;
   const isActive = formatBtn.textContent === 'Stop';
   formatBtn.disabled = isActive ? false : !hasSource;
@@ -762,14 +745,8 @@ function renderState(state) {
 
   // ── Format tab state (unified flow) ──
   if (state.format) {
-    if (state.format.resultText && !formatUserEdited) {
+    if (state.format.resultText) {
       formatResult.value = state.format.resultText;
-    } else if (state.format.resultText && formatResult.value !== state.format.resultText) {
-      // Only overwrite if user hasn't manually edited the format source
-      // and the result is genuinely new.
-      if (!formatUserEdited) {
-        formatResult.value = state.format.resultText;
-      }
     }
     if (state.format.status) {
       setFormatStatus(state.format.status);
@@ -783,10 +760,6 @@ function renderState(state) {
       if (state.format.resultText) {
         formatCopy.disabled = false;
       }
-    }
-    if (state.format.prompt !== undefined) {
-      // Persisted prompt from background — restore on initial load
-      // (popup.js init() will overwrite this for known tabIds).
     }
   }
 

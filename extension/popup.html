@@ -210,7 +210,7 @@
     }
 
     /* Format / Translation textareas (shared) */
-    #format-source, #format-prompt, #format-result,
+    #format-prompt, #format-result,
     #tl-source, #tl-prompt, #tl-result {
       width: 100%;
       padding: 8px;
@@ -224,12 +224,11 @@
       box-sizing: border-box;
       margin-bottom: 8px;
     }
-    #format-source:focus, #format-prompt:focus, #format-result:focus,
+    #format-prompt:focus, #format-result:focus,
     #tl-source:focus, #tl-prompt:focus, #tl-result:focus {
       border-color: #38bdf8;
       outline: none;
     }
-    #format-source  { height: 100px; resize: vertical; }
     #format-prompt  { min-height: 60px; resize: vertical; }
     #format-result  { height: 120px; resize: vertical; }
     #tl-source      { height: 100px; resize: vertical; }
@@ -318,11 +317,11 @@
 
       .force-label { color: #64748b; }
 
-      #format-source, #format-prompt, #format-result,
+      #format-prompt, #format-result,
       #tl-source, #tl-prompt, #tl-result {
         border-color: #cbd5e1; background: #ffffff; color: #0f172a;
       }
-      #format-source:focus, #format-prompt:focus, #format-result:focus,
+      #format-prompt:focus, #format-result:focus,
       #tl-source:focus, #tl-prompt:focus, #tl-result:focus {
         border-color: #0284c7;
       }
@@ -334,7 +333,7 @@
 <body>
   <div class="header">
     <h1>YT2TXT</h1>
-    <span class="version">v0.0.28</span>
+    <span class="version">v0.0.29</span>
   </div>
 
   <div class="tab-bar">
@@ -401,8 +400,6 @@
     <div class="panel-header">
       <h1>Format Transcript</h1>
     </div>
-    <label class="panel-label" for="format-source">Source Text</label>
-    <textarea id="format-source" placeholder="Paste or auto-filled from Transcript tab..."></textarea>
     <details class="collapsible">
       <summary>Formatting Instructions (optional)</summary>
       <textarea id="format-prompt" placeholder="E.g.: Format this transcript into well-structured paragraphs..."></textarea>
