@@ -933,9 +933,11 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
             if not (in_manual or in_auto):
                 _debug(
                     "subs",
-                    f"Requested language '{req_lang}' not available — falling back to transcription",
+                    f"Requested language '{req_lang}' not available — "
+                    "falling back to default subs / auto-detect transcription",
                 )
                 req_lang = None
+                language = ""  # also clear the transcription hint since language is unknown
 
         # Try manual subs first (preferred over auto-generated captions).
         sub_path: str | None = None
