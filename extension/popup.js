@@ -17,6 +17,7 @@ const downloadBtn = document.getElementById('download');
 const hostInput = document.getElementById('host');
 const portInput = document.getElementById('port');
 const langSelect = document.getElementById('lang');
+const forceCheckbox = document.getElementById('force');
 
 // ── Format panel elements ─────────────────────────────────────
 const fmtSource = document.getElementById('fmt-source');
@@ -250,11 +251,20 @@ async function init() {
   // Refresh state from background
   await refreshState();
 
-  // Load persisted transcript result
+  // Load persisted transcript result (keyed by tabId+URL)
   const resultKey = currentTabId ? `transcript:${currentTabId}` : null;
   if (!resultEl.value.trim() && resultKey) {
     const stored = await chrome.storage.local.get(resultKey);
-    if (stored[resultKey]) resultEl.value = stored[resultKey];
+    const entry = stored[resultKey];
+    if (entry) {
+      if (typeof entry === 'object' && entry.url === tab?.url) {
+        resultEl.value = entry.text || '';
+      } else if (typeof entry === 'string') {
+        // Legacy format (pre-URL-keyed)
+        resultEl.value = entry;
+      }
+      // Otherwise: stored URL doesn't match → leave textarea empty
+    }
   }
 
   // Load translation tab state (per-tab)
@@ -406,6 +416,7 @@ async function startCapture() {
   downloadBtn.disabled = true;
 
   startBtn.disabled = true;
+  forceCheckbox.disabled = true;
   stopBtn.classList.remove('hidden');
   statusBar.textContent = 'Starting...';
   statusBar.className = 'status-bar';
@@ -415,17 +426,21 @@ async function startCapture() {
       type: 'popup:start',
       url,
       lang: langSelect.value,
+      force: forceCheckbox.checked,
     });
+    forceCheckbox.checked = false;
     if (!response?.ok) {
       statusBar.textContent = response?.error || 'Failed to start.';
       statusBar.className = 'status-bar error';
       startBtn.disabled = false;
+      forceCheckbox.disabled = false;
       stopBtn.classList.add('hidden');
     }
   } catch (e) {
     statusBar.textContent = e.message || 'Failed to start.';
     statusBar.className = 'status-bar error';
     startBtn.disabled = false;
+    forceCheckbox.disabled = false;
     stopBtn.classList.add('hidden');
   }
 }
@@ -690,6 +705,7 @@ function renderState(state) {
 
   // Buttons
   startBtn.disabled = isActive;
+  forceCheckbox.disabled = isActive;
   stopBtn.classList.toggle('hidden', !isActive);
 
   updateResultButtons();

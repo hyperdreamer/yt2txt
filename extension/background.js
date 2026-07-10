@@ -301,7 +301,7 @@ async function handleStart(msg) {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: msg.url, language: msg.lang || 'en' }),
+        body: JSON.stringify({ url: msg.url, language: msg.lang || 'en', force: msg.force || false }),
       },
       controller.signal
     );
@@ -319,8 +319,10 @@ async function handleStart(msg) {
 
     resultText = payload.text || '';
 
-    // Persist result
-    await chrome.storage.local.set({ [`transcript:${tab.id}`]: resultText });
+    // Persist result (keyed by tabId, URL-checked on load)
+    await chrome.storage.local.set({
+      [`transcript:${tab.id}`]: { text: resultText, url: msg.url },
+    });
 
     updateState(tab.id, {
       active: false,
