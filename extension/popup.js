@@ -145,14 +145,15 @@ chrome.runtime.onMessage.addListener((message) => {
     if (message.text) {
       // Format succeeded — replace transcript text
       resultEl.value = message.text;
-      formatRetryBtn.classList.add('hidden');
+      formatRetryBtn.disabled = false;
+      formatRetryBtn.textContent = 'Format';
       statusBar.textContent = 'Formatted ✓';
       statusBar.className = 'status-bar success';
       chrome.storage.local.set({ [`transcript:${currentTabId}`]: message.text });
     } else if (message.error) {
       // Format failed — show retry button
-      formatRetryBtn.classList.remove('hidden');
       formatRetryBtn.disabled = false;
+      formatRetryBtn.textContent = 'Format';
       statusBar.textContent = message.error || 'Formatting failed. Click Format to retry.';
       statusBar.className = 'status-bar error';
     }
@@ -412,6 +413,7 @@ async function startCapture() {
   resultEl.value = '';
   copyBtn.disabled = true;
   downloadBtn.disabled = true;
+  formatRetryBtn.disabled = true;
 
   startBtn.disabled = true;
   forceCheckbox.disabled = true;
@@ -646,6 +648,7 @@ function updateResultButtons() {
   const hasText = resultEl.value.trim().length > 0;
   copyBtn.disabled = !hasText;
   downloadBtn.disabled = !hasText;
+  formatRetryBtn.disabled = !hasText;
 }
 
 // ── Render ─────────────────────────────────────────────────────
@@ -674,6 +677,7 @@ function renderState(state) {
   startBtn.disabled = isActive;
   forceCheckbox.disabled = isActive;
   stopBtn.classList.toggle('hidden', !isActive);
+  if (isActive) formatRetryBtn.disabled = true;
 
   updateResultButtons();
   updateTranslationButtons();

@@ -19,6 +19,13 @@ backend/            ← FastAPI backend
   requirements.txt  ← Python dependencies
 ```
 
+### Host permissions rationale
+The manifest uses wildcard ports (`localhost:*`, `127.0.0.1:*`, `[::1]:*`) because
+both the YT2TXT and TextKit backend ports are user-configurable via the popup UI.
+Restricting to specific ports would break setups using non-default ports.
+The extension validates that `host` is always localhost/127.0.0.1/::1, so the
+wildcard does not expand the attack surface beyond the local machine.
+
 ## Extension patterns (follow ai-ocr exactly)
 
 ### Message-passing architecture

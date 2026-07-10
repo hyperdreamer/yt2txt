@@ -3,7 +3,6 @@
   "name": "YT2TXT — Video to Transcript",
   "version": "0.0.21",
   "description": "Extract transcripts from YouTube and any yt-dlp supported site. Uses AI transcription when native subtitles are unavailable.",
-  "_host_permissions_note": "Wildcard ports are intentional — the backend port is user-configurable and can be any port on localhost. Restricting to specific ports would break setups using non-default ports.",
   "permissions": [
     "activeTab",
     "tabs",
