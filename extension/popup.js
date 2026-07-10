@@ -1,4 +1,12 @@
-// ── Elements ────────────────────────────────────────────────────
+// ── Tab state ─────────────────────────────────────────────────
+const tabs = document.querySelectorAll('.tab');
+const panels = {
+  'transcript-panel': document.getElementById('transcript-panel'),
+  'format-panel': document.getElementById('format-panel'),
+  'translation-panel': document.getElementById('translation-panel'),
+};
+
+// ── Transcript panel elements ─────────────────────────────────
 const urlInput = document.getElementById('url');
 const startBtn = document.getElementById('start');
 const stopBtn = document.getElementById('stop');
@@ -9,40 +17,185 @@ const downloadBtn = document.getElementById('download');
 const hostInput = document.getElementById('host');
 const portInput = document.getElementById('port');
 const langSelect = document.getElementById('lang');
-const forceCheckbox = document.getElementById('force');
+
+// ── Format panel elements ─────────────────────────────────────
+const fmtSource = document.getElementById('fmt-source');
+const formatPrompt = document.getElementById('format-prompt');
+const fmtStatusBar = document.getElementById('fmt-status-bar');
+const fmtResult = document.getElementById('fmt-result');
+const fmtFormat = document.getElementById('fmt-format');
+const fmtCopy = document.getElementById('fmt-copy');
+const fmtSave = document.getElementById('fmt-save');
+const fmtDownload = document.getElementById('fmt-download');
+const fmtAutocopy = document.getElementById('fmt-autocopy');
+const fmtAutosave = document.getElementById('fmt-autosave');
+const fmtAutoformat = document.getElementById('fmt-autoformat');
+const fmtSavePath = document.getElementById('fmt-save-path');
+const fmtPathSuggestions = document.getElementById('fmt-path-suggestions');
+
+// ── Translation panel elements ────────────────────────────────
+const tl2Language = document.getElementById('tl2-language');
+const translatePrompt = document.getElementById('translate-prompt');
+const tl2StatusBar = document.getElementById('tl2-status-bar');
+const tl2Result = document.getElementById('tl2-result');
+const tl2Translate = document.getElementById('tl2-translate');
+const tl2Copy = document.getElementById('tl2-copy');
+const tl2Save = document.getElementById('tl2-save');
+const tl2Download = document.getElementById('tl2-download');
+const tl2AutocopyCheckbox = document.getElementById('tl2-autocopy');
+const tl2AutosaveCheckbox = document.getElementById('tl2-autosave');
+const tl2AutotranslateCheckbox = document.getElementById('tl2-autotranslate');
+const tl2AutosavePath = document.getElementById('tl2-autosave-path');
+const tl2PathSuggestions = document.getElementById('tl2-path-suggestions');
+
+// ── TextKit backend elements ──────────────────────────────────
+const textkitHostInput = document.getElementById('textkit-host');
+const textkitPortInput = document.getElementById('textkit-port');
 
 // ── State ──────────────────────────────────────────────────────
 let latestState = null;
 let currentTabId = null;
 let userEditedResult = false;
 
-// ── Event listeners ────────────────────────────────────────────
+// ── Tab switching ──────────────────────────────────────────────
+tabs.forEach((tab) => {
+  tab.addEventListener('click', () => {
+    tabs.forEach((t) => t.classList.remove('active'));
+    tab.classList.add('active');
+    Object.values(panels).forEach((p) => p.classList.add('hidden'));
+    panels[tab.dataset.panel].classList.remove('hidden');
+  });
+});
+
+// ── Event listeners ───────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   init().catch((e) => {
     statusBar.textContent = `Init failed: ${e.message}`;
-    statusBar.className = 'error';
+    statusBar.className = 'status-bar error';
+    setFmtProgress(`Init failed: ${e.message}`);
+    setTl2Progress(`Init failed: ${e.message}`);
   });
 });
+
+// Transcript panel
 startBtn.addEventListener('click', startCapture);
 stopBtn.addEventListener('click', stopCapture);
 copyBtn.addEventListener('click', copyText);
 downloadBtn.addEventListener('click', downloadText);
-hostInput.addEventListener('change', saveSettings);
-portInput.addEventListener('change', saveSettings);
-langSelect.addEventListener('change', saveSettings);
+hostInput.addEventListener('change', saveYt2txtSettings);
+portInput.addEventListener('change', saveYt2txtSettings);
+langSelect.addEventListener('change', saveYt2txtSettings);
 resultEl.addEventListener('input', () => {
   userEditedResult = true;
   updateResultButtons();
+  updateTranslationButtons();
+  updateFormatButtons();
 });
 
+// Format panel
+fmtFormat.addEventListener('click', doFormat);
+fmtCopy.addEventListener('click', () => copyResult(fmtResult, fmtCopy));
+fmtDownload.addEventListener('click', () => downloadAsFile(fmtResult.value.trim(), 'format'));
+fmtSave.addEventListener('click', saveFormatResult);
+formatPrompt.addEventListener('input', saveFormatPrompt);
+fmtAutocopy.addEventListener('change', saveFormatSettings);
+fmtAutosave.addEventListener('change', saveFormatSettings);
+fmtAutoformat.addEventListener('change', saveFormatSettings);
+fmtSource.addEventListener('change', () => {
+  saveFormatSettings();
+  updateFormatButtons();
+});
+fmtSavePath.addEventListener('input', saveFormatSettings);
+
+// Translation panel
+tl2Translate.addEventListener('click', doTranslation);
+tl2Copy.addEventListener('click', () => copyResult(tl2Result, tl2Copy));
+tl2Download.addEventListener('click', () => downloadAsFile(tl2Result.value.trim(), 'translate'));
+tl2Save.addEventListener('click', saveTranslation);
+tl2Language.addEventListener('change', () => {
+  saveTl2Language();
+  loadTranslatePromptForLanguage();
+});
+tl2AutocopyCheckbox.addEventListener('change', saveTl2Settings);
+tl2AutosaveCheckbox.addEventListener('change', saveTl2Settings);
+tl2AutotranslateCheckbox.addEventListener('change', saveTl2Settings);
+tl2AutosavePath.addEventListener('input', saveTl2Settings);
+translatePrompt.addEventListener('input', saveTranslatePrompt);
+
+// TextKit backend
+textkitHostInput.addEventListener('change', saveTextkitBackend);
+textkitPortInput.addEventListener('change', saveTextkitBackend);
+
+// ── Background messages ───────────────────────────────────────
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'state:update') {
     if (message.tabId !== currentTabId) return;
     renderState(message.state);
+    return;
+  }
+  if (message?.type === 'translation:update') {
+    if (message.tabId !== currentTabId) return;
+    if (message.text) {
+      tl2Result.value = message.text;
+      chrome.storage.local.set({ [`tl2Result:${currentTabId}`]: message.text });
+    } else if (message.error) {
+      // Error path: keep any existing result visible
+    }
+    tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = !message.text;
+    tl2Translate.textContent = 'Translate';
+    tl2Translate.classList.remove('danger');
+    chrome.storage.local.remove(`tl2Translating:${currentTabId}`);
+    setTl2Progress(message.text ? 'Translation complete.' : (message.error || 'Translation failed.'));
+    updateTranslationButtons();
+    return;
+  }
+  if (message?.type === 'tl2:translating') {
+    if (message.tabId !== currentTabId) return;
+    if (message.value) {
+      tl2Translate.textContent = 'Stop';
+      tl2Translate.classList.add('danger');
+      tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
+      setTl2Progress('Translating...');
+    } else {
+      tl2Translate.textContent = 'Translate';
+      tl2Translate.classList.remove('danger');
+      updateTranslationButtons();
+    }
+    return;
+  }
+  if (message?.type === 'format:update') {
+    if (message.tabId !== currentTabId) return;
+    if (message.text) {
+      fmtResult.value = message.text;
+      chrome.storage.local.set({ [`fmtResult:${currentTabId}`]: message.text });
+    } else if (message.error) {
+      // Error path: keep any existing result visible
+    }
+    fmtCopy.disabled = fmtSave.disabled = fmtDownload.disabled = !message.text;
+    fmtFormat.textContent = 'Format';
+    fmtFormat.classList.remove('danger');
+    chrome.storage.local.remove(`fmtFormatting:${currentTabId}`);
+    setFmtProgress(message.text ? 'Formatting complete.' : (message.error || 'Formatting failed.'));
+    updateFormatButtons();
+    return;
+  }
+  if (message?.type === 'fmt:formatting') {
+    if (message.tabId !== currentTabId) return;
+    if (message.value) {
+      fmtFormat.textContent = 'Stop';
+      fmtFormat.classList.add('danger');
+      fmtCopy.disabled = fmtSave.disabled = fmtDownload.disabled = true;
+      setFmtProgress('Formatting...');
+    } else {
+      fmtFormat.textContent = 'Format';
+      fmtFormat.classList.remove('danger');
+      updateFormatButtons();
+    }
+    return;
   }
 });
 
-// ── Init ────────────────────────────────────────────────────────
+// ── Init ───────────────────────────────────────────────────────
 async function init() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTabId = tab?.id || null;
@@ -52,31 +205,123 @@ async function init() {
     yt2txtHost: 'localhost',
     yt2txtPort: 8666,
     yt2txtLang: '',
+    textkitHost: '',
+    textkitPort: 8765,
+    tl2AutoCopy: false,
+    tl2AutoSave: false,
+    tl2AutoSavePath: '',
+    yt2txtAutoTranslate: false,
+    fmtAutoCopy: false,
+    fmtAutoSave: false,
+    fmtAutoFormat: false,
+    fmtSavePath: '',
+    fmtSourceVal: 'transcript',
   });
+
+  // Auto-fill TextKit host from yt2txt host if empty (common single-machine case)
+  if (!items.textkitHost) items.textkitHost = items.yt2txtHost;
+
   hostInput.value = items.yt2txtHost;
   portInput.value = items.yt2txtPort;
   langSelect.value = items.yt2txtLang;
+  textkitHostInput.value = items.textkitHost;
+  textkitPortInput.value = items.textkitPort;
+
+  tl2AutocopyCheckbox.checked = items.tl2AutoCopy;
+  tl2AutosaveCheckbox.checked = items.tl2AutoSave;
+  tl2AutosavePath.value = items.tl2AutoSavePath;
+  tl2AutotranslateCheckbox.checked = items.yt2txtAutoTranslate;
+
+  fmtAutocopy.checked = items.fmtAutoCopy;
+  fmtAutosave.checked = items.fmtAutoSave;
+  fmtAutoformat.checked = items.fmtAutoFormat;
+  fmtSavePath.value = items.fmtSavePath;
+  fmtSource.value = items.fmtSourceVal || 'transcript';
 
   // Pre-fill URL from current tab
   if (tab?.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('about:')) {
     urlInput.value = tab.url;
   }
 
+  // Load format prompt
+  const localItems = await chrome.storage.local.get(['formatPrompt']);
+  if (localItems.formatPrompt) formatPrompt.value = localItems.formatPrompt;
+
   // Refresh state from background
   await refreshState();
 
-  // Load persisted result
+  // Load persisted transcript result
   const resultKey = currentTabId ? `transcript:${currentTabId}` : null;
   if (!resultEl.value.trim() && resultKey) {
     const stored = await chrome.storage.local.get(resultKey);
     if (stored[resultKey]) resultEl.value = stored[resultKey];
   }
 
+  // Load translation tab state (per-tab)
+  if (currentTabId) {
+    const tl2Keys = [
+      `tl2Result:${currentTabId}`,
+      `tl2Language:${currentTabId}`,
+      `tl2Status:${currentTabId}`,
+      `tl2Translating:${currentTabId}`,
+      `fmtResult:${currentTabId}`,
+      `fmtStatus:${currentTabId}`,
+      `fmtFormatting:${currentTabId}`,
+    ];
+    const tl2Stored = await chrome.storage.local.get(tl2Keys);
+    if (tl2Stored[`tl2Language:${currentTabId}`]) {
+      tl2Language.value = tl2Stored[`tl2Language:${currentTabId}`];
+    }
+    if (tl2Stored[`tl2Result:${currentTabId}`]) {
+      tl2Result.value = tl2Stored[`tl2Result:${currentTabId}`];
+    }
+    if (tl2Stored[`tl2Status:${currentTabId}`]) {
+      setTl2Progress(tl2Stored[`tl2Status:${currentTabId}`]);
+    }
+    if (tl2Stored[`fmtResult:${currentTabId}`]) {
+      fmtResult.value = tl2Stored[`fmtResult:${currentTabId}`];
+    }
+    if (tl2Stored[`fmtStatus:${currentTabId}`]) {
+      setFmtProgress(tl2Stored[`fmtStatus:${currentTabId}`]);
+    }
+
+    // Restore "Stop" button state if mid-translation
+    if (tl2Stored[`tl2Translating:${currentTabId}`]) {
+      // If we also have a result, this is "completed while closed" — show result.
+      if (tl2Result.value.trim()) {
+        chrome.storage.local.remove(`tl2Translating:${currentTabId}`);
+        tl2Translate.textContent = 'Translate';
+        tl2Translate.classList.remove('danger');
+      } else {
+        tl2Translate.textContent = 'Stop';
+        tl2Translate.classList.add('danger');
+        setTl2Progress('Translating...');
+      }
+    }
+    // Restore "Stop" button state if mid-formatting
+    if (tl2Stored[`fmtFormatting:${currentTabId}`]) {
+      if (fmtResult.value.trim()) {
+        chrome.storage.local.remove(`fmtFormatting:${currentTabId}`);
+        fmtFormat.textContent = 'Format';
+        fmtFormat.classList.remove('danger');
+      } else {
+        fmtFormat.textContent = 'Stop';
+        fmtFormat.classList.add('danger');
+        setFmtProgress('Formatting...');
+      }
+    }
+  }
+
+  // Load translation prompt for current language
+  await loadTranslatePromptForLanguage();
+
   updateResultButtons();
+  updateTranslationButtons();
+  updateFormatButtons();
 }
 
-// ── Settings ────────────────────────────────────────────────────
-async function saveSettings() {
+// ── Settings ───────────────────────────────────────────────────
+async function saveYt2txtSettings() {
   await chrome.storage.sync.set({
     yt2txtHost: hostInput.value.trim() || 'localhost',
     yt2txtPort: parseInt(portInput.value, 10) || 8666,
@@ -84,7 +329,56 @@ async function saveSettings() {
   });
 }
 
-// ── State sync ──────────────────────────────────────────────────
+// Backward-compatible alias (some scripts/old code may reference it)
+const saveSettings = saveYt2txtSettings;
+
+function saveTextkitBackend() {
+  chrome.storage.sync.set({
+    textkitHost: textkitHostInput.value.trim() || 'localhost',
+    textkitPort: parseInt(textkitPortInput.value, 10) || 8765,
+  });
+}
+
+function saveFormatSettings() {
+  chrome.storage.sync.set({
+    fmtAutoCopy: fmtAutocopy.checked,
+    fmtAutoSave: fmtAutosave.checked,
+    fmtAutoFormat: fmtAutoformat.checked,
+    fmtSavePath: fmtSavePath.value.trim(),
+    fmtSourceVal: fmtSource.value,
+  });
+}
+
+function saveTl2Settings() {
+  chrome.storage.sync.set({
+    tl2AutoCopy: tl2AutocopyCheckbox.checked,
+    tl2AutoSave: tl2AutosaveCheckbox.checked,
+    tl2AutoSavePath: tl2AutosavePath.value.trim(),
+    yt2txtAutoTranslate: tl2AutotranslateCheckbox.checked,
+  });
+}
+
+function saveTl2Language() {
+  if (!currentTabId) return;
+  chrome.storage.local.set({ [`tl2Language:${currentTabId}`]: tl2Language.value });
+}
+
+function saveFormatPrompt() {
+  chrome.storage.local.set({ formatPrompt: formatPrompt.value });
+}
+
+function saveTranslatePrompt() {
+  const lang = tl2Language.value;
+  chrome.storage.local.set({ [`translatePrompt:${lang}`]: translatePrompt.value });
+}
+
+async function loadTranslatePromptForLanguage() {
+  const lang = tl2Language.value;
+  const stored = await chrome.storage.local.get([`translatePrompt:${lang}`]);
+  translatePrompt.value = stored[`translatePrompt:${lang}`] || '';
+}
+
+// ── State sync ─────────────────────────────────────────────────
 async function refreshState() {
   try {
     const response = await chrome.runtime.sendMessage({ type: 'popup:get-state' });
@@ -97,12 +391,12 @@ async function refreshState() {
   }
 }
 
-// ── Actions ─────────────────────────────────────────────────────
+// ── Transcript actions ─────────────────────────────────────────
 async function startCapture() {
   const url = urlInput.value.trim();
   if (!url) {
     statusBar.textContent = 'Enter a video URL first.';
-    statusBar.className = 'error';
+    statusBar.className = 'status-bar error';
     return;
   }
 
@@ -113,30 +407,25 @@ async function startCapture() {
 
   startBtn.disabled = true;
   stopBtn.classList.remove('hidden');
-  forceCheckbox.disabled = true;
   statusBar.textContent = 'Starting...';
-  statusBar.className = '';
+  statusBar.className = 'status-bar';
 
   try {
     const response = await chrome.runtime.sendMessage({
       type: 'popup:start',
       url,
       lang: langSelect.value,
-      force: forceCheckbox.checked,
     });
-    forceCheckbox.checked = false;
     if (!response?.ok) {
       statusBar.textContent = response?.error || 'Failed to start.';
-      statusBar.className = 'error';
+      statusBar.className = 'status-bar error';
       startBtn.disabled = false;
-      forceCheckbox.disabled = false;
       stopBtn.classList.add('hidden');
     }
   } catch (e) {
     statusBar.textContent = e.message || 'Failed to start.';
-    statusBar.className = 'error';
+    statusBar.className = 'status-bar error';
     startBtn.disabled = false;
-    forceCheckbox.disabled = false;
     stopBtn.classList.add('hidden');
   }
 }
@@ -175,7 +464,209 @@ function downloadText() {
   URL.revokeObjectURL(url);
 }
 
-// ── Render ──────────────────────────────────────────────────────
+// ── Format panel actions ──────────────────────────────────────
+async function doFormat() {
+  if (fmtFormat.textContent === 'Stop') {
+    fmtFormat.disabled = true;
+    try {
+      await chrome.runtime.sendMessage({ type: 'format:stop', tabId: currentTabId });
+    } catch {
+      // Best effort
+    }
+    return;
+  }
+
+  const sourceType = fmtSource.value;
+  const sourceText = sourceType === 'transcript' ? resultEl.value.trim() : tl2Result.value.trim();
+  if (!sourceText) {
+    setFmtProgress('No source text available.');
+    return;
+  }
+  const prompt = formatPrompt.value.trim();
+  if (!prompt) {
+    setFmtProgress('Enter a formatting prompt first.');
+    return;
+  }
+
+  fmtResult.value = '';
+  fmtCopy.disabled = fmtSave.disabled = fmtDownload.disabled = true;
+
+  const host = textkitHostInput.value.trim() || 'localhost';
+  const port = parseInt(textkitPortInput.value, 10) || 8765;
+
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'format:start',
+      tabId: currentTabId,
+      text: sourceText,
+      prompt,
+      host,
+      port,
+    });
+  } catch {
+    // Background will broadcast status
+  }
+}
+
+async function saveFormatResult() {
+  const text = fmtResult.value.trim();
+  const path = fmtSavePath.value.trim();
+  if (!text || !path) {
+    setFmtProgress('Enter a save path first.');
+    return;
+  }
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'save:translation', text, path });
+    if (r?.ok) {
+      fmtSave.textContent = 'Saved!';
+      setTimeout(() => (fmtSave.textContent = 'Save'), 1500);
+      setFmtProgress(`Saved to ${r.path || path}`);
+    } else {
+      setFmtProgress(r?.error || 'Save failed.');
+    }
+  } catch (e) {
+    setFmtProgress(e.message || 'Save failed.');
+  }
+}
+
+// ── Translation panel actions ─────────────────────────────────
+async function doTranslation() {
+  if (tl2Translate.textContent === 'Stop') {
+    tl2Translate.disabled = true;
+    try {
+      await chrome.runtime.sendMessage({ type: 'translate:stop', tabId: currentTabId });
+    } catch {
+      // Best effort
+    }
+    return;
+  }
+
+  const text = resultEl.value.trim();
+  if (!text) {
+    setTl2Progress('No transcript text to translate.');
+    return;
+  }
+  const language = tl2Language.value;
+
+  tl2Result.value = '';
+  tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
+
+  const host = textkitHostInput.value.trim() || 'localhost';
+  const port = parseInt(textkitPortInput.value, 10) || 8765;
+
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'translate:start',
+      tabId: currentTabId,
+      text,
+      language,
+      host,
+      port,
+    });
+  } catch {
+    // Background will broadcast status
+  }
+}
+
+async function saveTranslation() {
+  const text = tl2Result.value.trim();
+  const path = tl2AutosavePath.value.trim();
+  if (!text || !path) {
+    setTl2Progress('Enter a save path first.');
+    return;
+  }
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'save:translation', text, path });
+    if (r?.ok) {
+      tl2Save.textContent = 'Saved!';
+      setTimeout(() => (tl2Save.textContent = 'Save'), 1500);
+      setTl2Progress(`Saved to ${r.path || path}`);
+    } else {
+      setTl2Progress(r?.error || 'Save failed.');
+    }
+  } catch (e) {
+    setTl2Progress(e.message || 'Save failed.');
+  }
+}
+
+// ── Shared helpers ────────────────────────────────────────────
+async function copyResult(textarea, button) {
+  const text = textarea.value.trim();
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    button.textContent = 'Copied!';
+    setTimeout(() => (button.textContent = 'Copy'), 1500);
+  } catch {
+    textarea.select();
+    document.execCommand('copy');
+  }
+}
+
+function downloadAsFile(text, prefix) {
+  if (!text) return;
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${prefix}_${new Date().toISOString().slice(0, 10)}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── Progress helpers ──────────────────────────────────────────
+function setTl2Progress(msg) {
+  tl2StatusBar.textContent = msg;
+  tl2StatusBar.className = 'status-bar';
+  if (msg && (msg.includes('failed') || msg.includes('timed out') || msg.includes('error') || msg.includes('Error'))) {
+    tl2StatusBar.className = 'status-bar error';
+  }
+  if (msg && (msg.includes('complete') || msg.includes('Ready') || msg.includes('Saved'))) {
+    tl2StatusBar.className = 'status-bar success';
+  }
+}
+
+function setFmtProgress(msg) {
+  fmtStatusBar.textContent = msg;
+  fmtStatusBar.className = 'status-bar';
+  if (msg && (msg.includes('failed') || msg.includes('timed out') || msg.includes('error') || msg.includes('Error'))) {
+    fmtStatusBar.className = 'status-bar error';
+  }
+  if (msg && (msg.includes('complete') || msg.includes('Ready') || msg.includes('Saved'))) {
+    fmtStatusBar.className = 'status-bar success';
+  }
+}
+
+function updateTranslationButtons() {
+  const hasSource = resultEl.value.trim().length > 0;
+  const hasResult = tl2Result.value.trim().length > 0;
+  const isActive = tl2Translate.textContent === 'Stop';
+  tl2Translate.disabled = isActive ? false : !hasSource;
+  tl2Copy.disabled = !hasResult;
+  tl2Save.disabled = !hasResult;
+  tl2Download.disabled = !hasResult;
+}
+
+function updateFormatButtons() {
+  const sourceType = fmtSource.value;
+  const hasSource = sourceType === 'transcript'
+    ? resultEl.value.trim().length > 0
+    : tl2Result.value.trim().length > 0;
+  const hasResult = fmtResult.value.trim().length > 0;
+  const isActive = fmtFormat.textContent === 'Stop';
+  fmtFormat.disabled = isActive ? false : !hasSource;
+  fmtCopy.disabled = !hasResult;
+  fmtSave.disabled = !hasResult;
+  fmtDownload.disabled = !hasResult;
+}
+
+function updateResultButtons() {
+  const hasText = resultEl.value.trim().length > 0;
+  copyBtn.disabled = !hasText;
+  downloadBtn.disabled = !hasText;
+}
+
+// ── Render ─────────────────────────────────────────────────────
 function renderState(state) {
   latestState = state || {};
   const isActive = Boolean(latestState.active);
@@ -183,13 +674,13 @@ function renderState(state) {
   // Progress / status
   if (latestState.error) {
     statusBar.textContent = latestState.error;
-    statusBar.className = 'error';
+    statusBar.className = 'status-bar error';
   } else if (latestState.progress) {
     statusBar.textContent = latestState.progress;
-    statusBar.className = isActive ? '' : 'success';
+    statusBar.className = isActive ? 'status-bar' : 'status-bar success';
   } else {
     statusBar.textContent = latestState.status || 'Ready';
-    statusBar.className = '';
+    statusBar.className = 'status-bar';
   }
 
   // Result text
@@ -199,14 +690,9 @@ function renderState(state) {
 
   // Buttons
   startBtn.disabled = isActive;
-  forceCheckbox.disabled = isActive;
   stopBtn.classList.toggle('hidden', !isActive);
 
   updateResultButtons();
-}
-
-function updateResultButtons() {
-  const hasText = resultEl.value.trim().length > 0;
-  copyBtn.disabled = !hasText;
-  downloadBtn.disabled = !hasText;
+  updateTranslationButtons();
+  updateFormatButtons();
 }

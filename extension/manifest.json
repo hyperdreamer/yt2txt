@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
   "name": "YT2TXT — Video to Transcript",
-  "version": "0.0.15",
+  "version": "0.0.16",
   "description": "Extract transcripts from YouTube and any yt-dlp supported site. Uses AI transcription when native subtitles are unavailable.",
   "permissions": [
     "activeTab",
     "tabs",
     "scripting",
     "downloads",
-    "storage"
+    "storage",
+    "offscreen",
+    "notifications"
   ],
   "host_permissions": [
     "http://localhost:*/*",

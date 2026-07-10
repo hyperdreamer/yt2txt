@@ -30,6 +30,29 @@
       color: #64748b;
     }
 
+    .tab-bar {
+      display: flex;
+      border-bottom: 2px solid #334155;
+      padding: 0 14px;
+      background: #0f172a;
+      margin: 0 -14px 10px;
+    }
+    .tab {
+      padding: 8px 16px;
+      color: #94a3b8;
+      font-size: 13px;
+      font-weight: 600;
+      border: none;
+      border-bottom: 2px solid transparent;
+      background: none;
+      cursor: pointer;
+      margin-bottom: -2px;
+    }
+    .tab.active {
+      color: #38bdf8;
+      border-bottom-color: #38bdf8;
+    }
+
     .settings {
       display: flex;
       gap: 8px;
@@ -129,14 +152,14 @@
 
     .hidden { display: none !important; }
 
-    #status-bar {
+    .status-bar {
       font-size: 12px;
       color: #94a3b8;
       margin-bottom: 10px;
       min-height: 16px;
     }
-    #status-bar.error { color: #f87171; }
-    #status-bar.success { color: #4ade80; }
+    .status-bar.error { color: #f87171; }
+    .status-bar.success { color: #4ade80; }
 
     #result {
       width: 100%;
@@ -162,6 +185,58 @@
       margin-top: 8px;
     }
 
+    .panel h1 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #38bdf8;
+      margin-bottom: 10px;
+    }
+
+    .collapsible {
+      margin-bottom: 10px;
+    }
+    .collapsible summary {
+      color: #94a3b8;
+      font-size: 11px;
+      text-transform: uppercase;
+      cursor: pointer;
+      padding: 4px 0;
+    }
+
+    .option-row {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    .option-row label {
+      color: #94a3b8;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .option-row input { cursor: pointer; }
+
+    /* Format/Translation result textareas */
+    #fmt-result, #tl2-result {
+      width: 100%;
+      min-height: 140px;
+      padding: 8px;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      background: #1e293b;
+      color: #e2e8f0;
+      font-size: 12px;
+      line-height: 1.5;
+      resize: vertical;
+      font-family: inherit;
+      margin-bottom: 10px;
+    }
+    #fmt-result:focus, #tl2-result:focus {
+      border-color: #38bdf8;
+      outline: none;
+    }
+
     /* ── Light theme ──────────────────────────────────────── */
     @media (prefers-color-scheme: light) {
       body {
@@ -170,6 +245,15 @@
       }
       .header h1 { color: #0284c7; }
       .header .version { color: #94a3b8; }
+
+      .tab-bar {
+        border-bottom-color: #cbd5e1;
+        background: #f8fafc;
+      }
+      .tab { color: #64748b; }
+      .tab.active { color: #0284c7; border-bottom-color: #0284c7; }
+
+      .panel h1 { color: #0284c7; }
 
       .settings label { color: #64748b; }
       .settings input, .settings select {
@@ -202,66 +286,162 @@
       }
       button.secondary:hover:not(:disabled) { background: #cbd5e1; }
 
-      .force-label { color: #64748b; }
+      .status-bar { color: #64748b; }
+      .status-bar.error { color: #dc2626; }
+      .status-bar.success { color: #16a34a; }
 
-      #status-bar { color: #64748b; }
-      #status-bar.error { color: #dc2626; }
-      #status-bar.success { color: #16a34a; }
+      .collapsible summary { color: #64748b; }
+      .option-row label { color: #334155; }
 
-      #result {
+      #result, #fmt-result, #tl2-result {
         border-color: #cbd5e1;
         background: #ffffff;
         color: #0f172a;
       }
-      #result:focus { border-color: #0284c7; }
+      #result:focus, #fmt-result:focus, #tl2-result:focus { border-color: #0284c7; }
+
+      #format-prompt, #translate-prompt {
+        background: #ffffff;
+        color: #0f172a;
+        border-color: #cbd5e1;
+      }
+      #format-prompt:focus, #translate-prompt:focus { border-color: #0284c7; }
     }
   </style>
 </head>
 <body>
   <div class="header">
     <h1>YT2TXT</h1>
-    <span class="version">v0.0.15</span>
+    <span class="version">v0.0.16</span>
   </div>
 
-  <div class="settings">
-    <label>Host <input id="host" type="text" placeholder="localhost"></label>
-    <label>Port <input id="port" type="number" placeholder="8666"></label>
-    <label>Lang
-      <select id="lang">
-        <option value="en">EN</option>
-        <option value="zh">中文</option>
-        <option value="ja">日本語</option>
-        <option value="ko">한국어</option>
-        <option value="es">ES</option>
-        <option value="fr">FR</option>
-        <option value="de">DE</option>
-        <option value="ru">RU</option>
-        <option value="ar">AR</option>
-        <option value="pt">PT</option>
-        <option value="hi">HI</option>
-        <option value="">Original</option>
-        <option value="all">All</option>
-      </select>
-    </label>
+  <div class="tab-bar">
+    <button class="tab active" data-panel="transcript-panel">Transcript</button>
+    <button class="tab" data-panel="format-panel">Format</button>
+    <button class="tab" data-panel="translation-panel">Translation</button>
   </div>
 
-  <div class="url-row">
-    <input id="url" type="text" placeholder="Paste video URL or use current page...">
+  <div class="settings" style="margin-bottom:10px">
+    <label>YT2TXT Host <input id="host" type="text" placeholder="localhost"></label>
+    <label>YT2TXT Port <input id="port" type="number" placeholder="8666"></label>
+    <label>TextKit Host <input id="textkit-host" type="text" placeholder="localhost"></label>
+    <label>TextKit Port <input id="textkit-port" type="number" placeholder="8765"></label>
   </div>
 
-  <div class="actions">
-    <button id="start" class="primary">Get Transcript</button>
-    <label class="force-label"><input type="checkbox" id="force"> Force refresh</label>
-    <button id="stop" class="danger hidden">Stop</button>
+  <div id="transcript-panel" class="panel">
+    <div class="settings">
+      <label>Lang
+        <select id="lang">
+          <option value="en">EN</option>
+          <option value="zh">中文</option>
+          <option value="ja">日本語</option>
+          <option value="ko">한국어</option>
+          <option value="es">ES</option>
+          <option value="fr">FR</option>
+          <option value="de">DE</option>
+          <option value="ru">RU</option>
+          <option value="ar">AR</option>
+          <option value="pt">PT</option>
+          <option value="hi">HI</option>
+          <option value="">Original</option>
+          <option value="all">All</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="url-row">
+      <input id="url" type="text" placeholder="Paste video URL or use current page...">
+    </div>
+
+    <div class="actions">
+      <button id="start" class="primary">Get Transcript</button>
+      <button id="stop" class="danger hidden">Stop</button>
+    </div>
+
+    <div id="status-bar" class="status-bar">Ready</div>
+
+    <textarea id="result" placeholder="Transcript will appear here..."></textarea>
+
+    <div class="result-actions">
+      <button id="copy" class="secondary" disabled>Copy</button>
+      <button id="download" class="secondary" disabled>Download</button>
+    </div>
   </div>
 
-  <div id="status-bar">Ready</div>
+  <div id="format-panel" class="panel hidden">
+    <h1>Format</h1>
+    <div class="settings">
+      <label>Source
+        <select id="fmt-source">
+          <option value="transcript">Transcript</option>
+          <option value="translation">Translation</option>
+        </select>
+      </label>
+    </div>
+    <details class="collapsible">
+      <summary>Format Prompt</summary>
+      <textarea id="format-prompt" placeholder="Custom formatting prompt. E.g.: Reformat this text as clean Markdown with headings and bullet points." style="width:100%;min-height:80px;box-sizing:border-box;padding:6px;border:1px solid #334155;border-radius:4px;background:#1e293b;color:#e2e8f0;font-size:12px;resize:vertical;font-family:inherit;"></textarea>
+    </details>
+    <div id="fmt-status-bar" class="status-bar">Ready</div>
+    <textarea id="fmt-result" readonly placeholder="Formatted text will appear here..."></textarea>
+    <div class="option-row">
+      <label><input id="fmt-autocopy" type="checkbox"> Auto-copy</label>
+      <label><input id="fmt-autosave" type="checkbox"> Auto-save</label>
+      <label><input id="fmt-autoformat" type="checkbox"> Auto-format</label>
+    </div>
+    <div class="settings">
+      <label>Save path
+        <input id="fmt-save-path" type="text" placeholder="e.g. transcripts/formatted.md" list="fmt-path-suggestions">
+        <datalist id="fmt-path-suggestions"></datalist>
+      </label>
+    </div>
+    <div class="actions">
+      <button id="fmt-format" class="primary">Format</button>
+      <button id="fmt-copy" class="secondary" disabled>Copy</button>
+      <button id="fmt-save" class="secondary" disabled>Save</button>
+      <button id="fmt-download" class="secondary" disabled>Download</button>
+    </div>
+  </div>
 
-  <textarea id="result" placeholder="Transcript will appear here..."></textarea>
-
-  <div class="result-actions">
-    <button id="copy" class="secondary" disabled>Copy</button>
-    <button id="download" class="secondary" disabled>Download</button>
+  <div id="translation-panel" class="panel hidden">
+    <h1>Translation</h1>
+    <div class="settings">
+      <label>Language
+        <select id="tl2-language">
+          <option value="original">Original</option>
+          <option value="Chinese">Chinese</option>
+          <option value="English">English</option>
+          <option value="Japanese">Japanese</option>
+          <option value="Korean">Korean</option>
+          <option value="French">French</option>
+          <option value="German">German</option>
+          <option value="Spanish">Spanish</option>
+        </select>
+      </label>
+    </div>
+    <details class="collapsible">
+      <summary>Translation Prompt</summary>
+      <textarea id="translate-prompt" placeholder="Custom AI prompt (per language). E.g.: Translate to formal academic Chinese." style="width:100%;min-height:100px;box-sizing:border-box;padding:6px;border:1px solid #334155;border-radius:4px;background:#1e293b;color:#e2e8f0;font-size:12px;resize:vertical;font-family:inherit;"></textarea>
+    </details>
+    <div id="tl2-status-bar" class="status-bar">Ready</div>
+    <textarea id="tl2-result" readonly placeholder="Translation will appear here..."></textarea>
+    <div class="option-row">
+      <label><input id="tl2-autocopy" type="checkbox"> Auto-copy</label>
+      <label><input id="tl2-autosave" type="checkbox"> Auto-save</label>
+      <label><input id="tl2-autotranslate" type="checkbox"> Auto-translate</label>
+    </div>
+    <div class="settings">
+      <label>Save path
+        <input id="tl2-autosave-path" type="text" placeholder="e.g. transcripts/translated.txt" list="tl2-path-suggestions">
+        <datalist id="tl2-path-suggestions"></datalist>
+      </label>
+    </div>
+    <div class="actions">
+      <button id="tl2-translate" class="primary" disabled>Translate</button>
+      <button id="tl2-copy" class="secondary" disabled>Copy</button>
+      <button id="tl2-save" class="secondary" disabled>Save</button>
+      <button id="tl2-download" class="secondary" disabled>Download</button>
+    </div>
   </div>
 
   <script src="popup.js"></script>
