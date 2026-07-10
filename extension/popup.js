@@ -18,12 +18,6 @@ const portInput = document.getElementById('port');
 const langSelect = document.getElementById('lang');
 const forceCheckbox = document.getElementById('force');
 
-// ── Auto-format config elements ────────────────────────────────
-const formatPrompt = document.getElementById('format-prompt');
-const fmtAutoformat = document.getElementById('fmt-autoformat');
-const fmtSavePath = document.getElementById('fmt-save-path');
-const fmtPathSuggestions = document.getElementById('fmt-path-suggestions');
-
 // ── Translation panel elements ────────────────────────────────
 const tl2Language = document.getElementById('tl2-language');
 const translatePrompt = document.getElementById('translate-prompt');
@@ -80,11 +74,6 @@ resultEl.addEventListener('input', () => {
   updateResultButtons();
   updateTranslationButtons();
 });
-
-// Auto-format config
-formatPrompt.addEventListener('input', saveFormatPrompt);
-fmtAutoformat.addEventListener('change', saveFormatSettings);
-fmtSavePath.addEventListener('input', saveFormatSettings);
 
 // Translation panel
 tl2Translate.addEventListener('click', doTranslation);
@@ -160,8 +149,6 @@ async function init() {
     tl2AutoSave: false,
     tl2AutoSavePath: '',
     yt2txtAutoTranslate: false,
-    fmtAutoFormat: false,
-    fmtSavePath: '',
   });
 
   // Auto-fill TextKit host from yt2txt host if empty (common single-machine case)
@@ -178,17 +165,10 @@ async function init() {
   tl2AutosavePath.value = items.tl2AutoSavePath;
   tl2AutotranslateCheckbox.checked = items.yt2txtAutoTranslate;
 
-  fmtAutoformat.checked = items.fmtAutoFormat;
-  fmtSavePath.value = items.fmtSavePath;
-
   // Pre-fill URL from current tab
   if (tab?.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('about:')) {
     urlInput.value = tab.url;
   }
-
-  // Load format prompt
-  const localItems = await chrome.storage.local.get(['formatPrompt']);
-  if (localItems.formatPrompt) formatPrompt.value = localItems.formatPrompt;
 
   // Refresh state from background
   await refreshState();
@@ -269,13 +249,6 @@ function saveTextkitBackend() {
   });
 }
 
-function saveFormatSettings() {
-  chrome.storage.sync.set({
-    fmtAutoFormat: fmtAutoformat.checked,
-    fmtSavePath: fmtSavePath.value.trim(),
-  });
-}
-
 function saveTl2Settings() {
   chrome.storage.sync.set({
     tl2AutoCopy: tl2AutocopyCheckbox.checked,
@@ -288,10 +261,6 @@ function saveTl2Settings() {
 function saveTl2Language() {
   if (!currentTabId) return;
   chrome.storage.local.set({ [`tl2Language:${currentTabId}`]: tl2Language.value });
-}
-
-function saveFormatPrompt() {
-  chrome.storage.local.set({ formatPrompt: formatPrompt.value });
 }
 
 function saveTranslatePrompt() {

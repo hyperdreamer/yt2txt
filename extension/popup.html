@@ -261,10 +261,10 @@
       }
       #result:focus, #tl2-result:focus { border-color: #0284c7; }
 
-      #format-prompt, #translate-prompt {
+      #translate-prompt {
         background: #ffffff; color: #0f172a; border-color: #cbd5e1;
       }
-      #format-prompt:focus, #translate-prompt:focus { border-color: #0284c7; }
+      #translate-prompt:focus { border-color: #0284c7; }
 
       .save-path-label { color: #64748b; }
       .save-path-label input {
@@ -339,19 +339,6 @@
       <button id="copy" class="secondary" disabled>Copy</button>
       <button id="download" class="secondary" disabled>Download</button>
     </div>
-
-    <details class="collapsible" style="margin-top:10px">
-      <summary>Auto-Format</summary>
-      <textarea id="format-prompt" placeholder="Custom formatting prompt. E.g.: Reformat as clean Markdown with headings and bullet points." style="width:100%;min-height:60px;box-sizing:border-box;padding:6px;border:1px solid #334155;border-radius:4px;background:#1e293b;color:#e2e8f0;font-size:12px;resize:vertical;font-family:inherit;margin-bottom:8px;"></textarea>
-      <div class="option-row">
-        <label><input id="fmt-autoformat" type="checkbox"> Auto-format after transcript/translation</label>
-      </div>
-      <div class="save-path-label">
-        <span>Save path</span>
-        <input id="fmt-save-path" type="text" placeholder="e.g. transcripts/formatted.md" list="fmt-path-suggestions">
-        <datalist id="fmt-path-suggestions"></datalist>
-      </div>
-    </details>
   </div>
 
   <div id="translation-panel" class="panel hidden">
