@@ -10,7 +10,8 @@ const LOCAL_BACKEND_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 // When source == target, no API call is needed — just pass through.
 const LANG_CODE_TO_NAME = {
   en: 'English', zh: 'Chinese', ja: 'Japanese', ko: 'Korean',
-  es: 'Spanish', fr: 'French', de: 'German',
+  es: 'Spanish', fr: 'French', de: 'German', ru: 'Russian',
+  ar: 'Arabic', pt: 'Portuguese', hi: 'Hindi',
 };
 
 // ── Backend URL cache (yt2txt) ──────────────────────────────────

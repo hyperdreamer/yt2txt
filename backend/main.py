@@ -34,7 +34,9 @@ CONFIG_PATH = Path(__file__).with_name("config.yaml")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8666
 DEFAULT_MODEL = "gpt-4o-transcribe"
-PRODUCTION = not os.environ.get("FLASK_DEBUG")
+PRODUCTION = not (
+    os.environ.get("YT2TXT_DEBUG") or os.environ.get("FLASK_DEBUG")
+)
 
 
 def _load_yaml_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
@@ -104,7 +106,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.26")
+app = FastAPI(title="YT2TXT", version="0.0.27")
 
 
 # ── Config (cached) ────────────────────────────────────────────────
@@ -870,7 +872,7 @@ def health() -> Response:
 
 @app.post("/transcript")
 async def transcript(req: TranscriptRequest) -> dict[str, Any]:
-    config = load_config()
+    config = get_config()
 
     # ── Validate input ──────────────────────────────────────
     if not req.url or not isinstance(req.url, str) or not req.url.strip():

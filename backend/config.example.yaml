@@ -22,9 +22,9 @@ ai:
 
 # Transcription cache (SQLite). Enabled by default.
 # Cache hits skip all yt-dlp and API work — instant response.
-# cache:
-#   enabled: true
-#   ttl_days: 30
+cache:
+  enabled: true
+  ttl_days: 30
 
 # Enable debug logging to stderr.
 # debug: false
