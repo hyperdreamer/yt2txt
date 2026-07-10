@@ -692,7 +692,10 @@ async function autoFormatIfEnabled(tabId, text, host, port) {
     const stored = await chrome.storage.local.get('formatPrompt');
     formatPrompt = stored.formatPrompt || '';
   }
-  if (!formatPrompt || !formatPrompt.trim()) return;
+  // Default format prompt if nothing configured
+  if (!formatPrompt || !formatPrompt.trim()) {
+    formatPrompt = 'Reformat the following text preserving all meaning. Fix punctuation, capitalization, paragraph breaks, and overall structure.';
+  }
   // Fall back to sync storage if caller didn't provide host/port
   if (!host || port === undefined) {
     const backend = await chrome.storage.sync.get({
