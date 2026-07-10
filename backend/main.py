@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import os
 import shlex
 import shutil
@@ -19,7 +18,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -105,10 +104,28 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.20")
+app = FastAPI(title="YT2TXT", version="0.0.21")
+
+
+# ── Config (cached) ────────────────────────────────────────────────
+
+_config_cache: AppConfig | None = None
+_config_cache_ts: float = 0.0
+
+
+def get_config() -> AppConfig:
+    """Return the current AppConfig, re-reading config.yaml at most every 60 s."""
+    global _config_cache, _config_cache_ts
+    now = time.monotonic()
+    if _config_cache is not None and (now - _config_cache_ts) < 60:
+        return _config_cache
+    _config_cache = load_config()
+    _config_cache_ts = now
+    return _config_cache
 
 
 # ── Request logging ─────────────────────────────────────────────
+
 
 @app.middleware("http")
 async def _log_requests(request: Request, call_next: Any) -> Response:
@@ -128,14 +145,19 @@ async def _log_requests(request: Request, call_next: Any) -> Response:
         "req",
         f"[{req_id}] {request.method} {request.url.path} → {response.status_code} ({elapsed:.3f}s)",
     )
-    # Prevent TCP connection reuse issues with Chrome extensions
+    # Close after every response to avoid TCP connection reuse issues with
+    # Chrome MV3 extensions. Chrome's extension fetch() may reuse a connection
+    # whose keep-alive has already expired on the uvicorn side, causing
+    # spurious "Connection reset" errors on subsequent requests.  Explicitly
+    # closing forces a fresh TCP handshake each time and avoids this class of
+    # flaky failures entirely.
     response.headers["Connection"] = "close"
     return response
 
 
 def _debug(tag: str, msg: str) -> None:
     """Print a timestamped debug message when debug mode is enabled."""
-    config = load_config()
+    config = get_config()
     if not config.debug:
         return
     from datetime import datetime, timezone
@@ -224,20 +246,6 @@ async def _run_ytdlp(args: list[str], timeout: float = 180) -> str:
     return stdout.decode("utf-8", errors="replace")
 
 
-def _find_subtitle_file(tmpdir: str, video_id: str) -> str | None:
-    """Find a .srt or .vtt subtitle file for the given video ID."""
-    extensions = [".srt", ".vtt", ".en.srt", ".en.vtt"]
-    for ext in extensions:
-        candidate = os.path.join(tmpdir, f"{video_id}{ext}")
-        if os.path.isfile(candidate):
-            return candidate
-    # Search for any .srt/.vtt in the temp dir
-    for fname in os.listdir(tmpdir):
-        if fname.endswith((".srt", ".vtt")):
-            return os.path.join(tmpdir, fname)
-    return None
-
-
 def _parse_subtitle_text(path: str) -> str:
     """Extract plain text from an SRT/VTT file (strip timestamps and indices)."""
     import re
@@ -255,7 +263,12 @@ def _parse_subtitle_text(path: str) -> str:
         content,
     )
 
-    # Remove sequence numbers (SRT)
+    # Remove sequence numbers (SRT block counters).
+    # NOTE: This will also remove legitimate subtitle lines that consist
+    # solely of a number (e.g. a caption that says "42").  This is an
+    # acceptable trade-off — SRT sequence numbers are far more common than
+    # lone-number captions, and a full context-aware parser would be
+    # significantly more complex.
     content = re.sub(r"^\d+\s*$", "", content, flags=re.M)
 
     # Remove <c> / </c> and other inline tags
@@ -344,9 +357,7 @@ def _resolve_subs_path(tmpdir: str, url: str) -> str | None:
     return None
 
 
-async def _download_subs_manual(
-    url: str, lang: str | None, tmpdir: str
-) -> str | None:
+async def _download_subs_manual(url: str, lang: str | None, tmpdir: str) -> str | None:
     """Try to download manual subtitles. Returns .srt/.vtt path or None.
 
     lang: simple code (e.g. "en"), "all", "" for yt-dlp default, or None.
@@ -412,12 +423,14 @@ async def _download_subs_auto(
 # ── OpenAI transcription ────────────────────────────────────────
 
 
-MAX_AUDIO_BYTES = 24 * 1024 * 1024  # OpenAI 25MB limit, leave 1MB for multipart overhead
-MAX_AUDIO_DURATION = 1300          # seconds — under OpenAI's 1400s limit per request
-CHUNK_DURATION_SECONDS = 20 * 60   # ~20 minutes per chunk at 64kbps ≈ 10MB
-CHUNK_OVERLAP_SECONDS = 10         # overlap between chunks to avoid word-boundary cuts
+MAX_AUDIO_BYTES = (
+    24 * 1024 * 1024
+)  # OpenAI 25MB limit, leave 1MB for multipart overhead
+MAX_AUDIO_DURATION = 1300  # seconds — under OpenAI's 1400s limit per request
+CHUNK_DURATION_SECONDS = 20 * 60  # ~20 minutes per chunk at 64kbps ≈ 10MB
+CHUNK_OVERLAP_SECONDS = 10  # overlap between chunks to avoid word-boundary cuts
 
-AUDIO_BITRATE_BPS = 64_000         # matches yt-dlp --postprocessor-args 64k
+AUDIO_BITRATE_BPS = 64_000  # matches yt-dlp --postprocessor-args 64k
 
 
 def _estimate_duration(file_size: int) -> float:
@@ -433,9 +446,12 @@ async def _get_audio_duration(audio_path: str) -> float:
     try:
         proc = await asyncio.create_subprocess_exec(
             ffprobe,
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "csv=p=0",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
             audio_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -460,26 +476,35 @@ async def _transcribe_file(
 
     url = f"{config.api_base}/audio/transcriptions"
 
+    file_size = os.path.getsize(audio_path)
+    if file_size == 0:
+        raise HTTPException(
+            status_code=500,
+            detail="Audio file is empty — nothing to transcribe.",
+        )
+
     with open(audio_path, "rb") as f:
         audio_data = f.read()
+
+    # Sanitize model name: strip CR/LF to prevent multipart header injection
+    # when the value is interpolated into the raw multipart body below.
+    safe_model = model.replace("\r", "").replace("\n", "")
 
     filename = os.path.basename(audio_path)
 
     boundary = os.urandom(16).hex()
     body = b""
     for field_name, field_value in [
-        ("model", model),
+        ("model", safe_model),
         ("response_format", "text"),
     ]:
         body += f"--{boundary}\r\n".encode()
-        body += (
-            f'Content-Disposition: form-data; name="{field_name}"\r\n\r\n'.encode()
-        )
+        body += f'Content-Disposition: form-data; name="{field_name}"\r\n\r\n'.encode()
         body += f"{field_value}\r\n".encode()
 
     body += f"--{boundary}\r\n".encode()
     body += f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode()
-    body += f"Content-Type: audio/mpeg\r\n\r\n".encode()
+    body += "Content-Type: audio/mpeg\r\n\r\n".encode()
     body += audio_data
     body += f"\r\n--{boundary}--\r\n".encode()
 
@@ -494,7 +519,9 @@ async def _transcribe_file(
     for attempt in (1, 2):
         try:
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(connect=10.0, read=deadline, write=60.0, pool=10.0)
+                timeout=httpx.Timeout(
+                    connect=10.0, read=deadline, write=60.0, pool=10.0
+                )
             ) as client:
                 response = await asyncio.wait_for(
                     client.post(url, headers=headers, content=body),
@@ -518,7 +545,9 @@ async def _transcribe_file(
         else:
             if response.is_error:
                 detail = response.text
-                if len(detail) > 500:
+                if PRODUCTION:
+                    detail = "Transcription API returned an error"
+                elif len(detail) > 500:
                     detail = detail[:500] + "..."
                 raise HTTPException(
                     status_code=502,
@@ -532,7 +561,11 @@ async def _transcribe_file(
         if attempt == 1:
             await asyncio.sleep(1)
 
-    assert last_exc is not None
+    if last_exc is None:
+        raise RuntimeError(
+            "Retry loop exhausted but no exception was captured — "
+            "this should never happen."
+        )
     raise last_exc
 
 
@@ -550,13 +583,13 @@ def _deduplicate_overlap(text_a: str, text_b: str, max_overlap: int = 300) -> st
     if not text_a or not text_b:
         return text_b
     suffix = text_a[-max_overlap:]
-    prefix = text_b[:max_overlap * 2]
+    prefix = text_b[: max_overlap * 2]
     for i in range(len(suffix)):
         candidate = suffix[i:]
         if len(candidate) < 5:  # too short to be a meaningful overlap
             break
         if prefix.startswith(candidate):
-            trimmed = text_b[len(candidate):]
+            trimmed = text_b[len(candidate) :]
             _debug(
                 "chunk",
                 f"Dedup overlap: removed {len(candidate)} chars "
@@ -566,9 +599,7 @@ def _deduplicate_overlap(text_a: str, text_b: str, max_overlap: int = 300) -> st
     return text_b
 
 
-async def _transcribe_audio(
-    audio_path: str, config: AppConfig, model: str
-) -> str:
+async def _transcribe_audio(audio_path: str, config: AppConfig, model: str) -> str:
     """Transcribe audio, chunking if file exceeds OpenAI's 25MB limit or 1400s duration.
 
     If the file is ≤24MB and ≤1300s, transcribes directly.
@@ -578,7 +609,10 @@ async def _transcribe_audio(
     duration = await _get_audio_duration(audio_path)
 
     if file_size <= MAX_AUDIO_BYTES and duration <= MAX_AUDIO_DURATION:
-        _debug("transcribe", f"File {file_size / 1024 / 1024:.1f}MB, {duration:.0f}s — direct")
+        _debug(
+            "transcribe",
+            f"File {file_size / 1024 / 1024:.1f}MB, {duration:.0f}s — direct",
+        )
         return await _transcribe_file(audio_path, config, model)
 
     reason = "size" if file_size > MAX_AUDIO_BYTES else "duration"
@@ -595,27 +629,40 @@ async def _transcribe_audio(
     # Each chunk covers CHUNK_DURATION_SECONDS of audio; adjacent chunks
     # share CHUNK_OVERLAP_SECONDS.  Transcription text is deduplicated
     # afterward to remove the repeated overlap region.
-    num_chunks = max(2, int(duration // CHUNK_DURATION_SECONDS)
-                     + (1 if duration % CHUNK_DURATION_SECONDS > 0 else 0))
+    #
+    # max(2, …) ensures we always produce at least two chunks when the
+    # split path is taken.  A single-chunk split is pointless (the audio
+    # is barely over the direct-transcription threshold), and the dedup
+    # logic expects at least two adjacent chunks to work with.
+    num_chunks = max(
+        2,
+        int(duration // CHUNK_DURATION_SECONDS)
+        + (1 if duration % CHUNK_DURATION_SECONDS > 0 else 0),
+    )
 
     chunk_paths: list[str] = []
     for i in range(num_chunks):
-        start = max(0.0, i * CHUNK_DURATION_SECONDS
-                    - (CHUNK_OVERLAP_SECONDS if i > 0 else 0))
-        is_last = (i == num_chunks - 1)
+        start = max(
+            0.0, i * CHUNK_DURATION_SECONDS - (CHUNK_OVERLAP_SECONDS if i > 0 else 0)
+        )
+        is_last = i == num_chunks - 1
         # ffprobe duration can be slightly shorter than the actual file
         # (rounding, mp3 frame padding).  For the last chunk, omit -to so
         # ffmpeg copies to the true EOF instead of stopping at `duration`.
         ffmpeg_args: list[str] = [
             ffmpeg,
             "-y",
-            "-i", audio_path,
-            "-ss", str(start),
-            "-c", "copy",
+            "-i",
+            audio_path,
+            "-ss",
+            str(start),
+            "-c",
+            "copy",
         ]
         if not is_last:
-            end = min(duration,
-                      (i + 1) * CHUNK_DURATION_SECONDS + CHUNK_OVERLAP_SECONDS)
+            end = min(
+                duration, (i + 1) * CHUNK_DURATION_SECONDS + CHUNK_OVERLAP_SECONDS
+            )
             ffmpeg_args += ["-to", str(end)]
         chunk_path = os.path.join(chunks_dir, f"chunk_{i:03d}.mp3")
         proc = await asyncio.create_subprocess_exec(
@@ -625,9 +672,7 @@ async def _transcribe_audio(
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            _stdout, _stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=60
-            )
+            _stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
         except asyncio.TimeoutError:
             proc.kill()
             raise HTTPException(
@@ -657,20 +702,28 @@ async def _transcribe_audio(
         texts.append(text)
 
     # Debug: save last chunk's audio and transcription for inspection.
-    try:
-        shutil.copy2(chunk_paths[-1], "/tmp/last_chunk_audio.mp3")
-        _debug("transcribe", f"Saved last chunk audio to /tmp/last_chunk_audio.mp3")
-    except Exception as exc:
-        import sys
-        print(f"Failed to save last chunk audio: {exc}", file=sys.stderr)
+    # Only when debug mode is enabled — prevents leaking transcript content
+    # to /tmp in production and avoids concurrent-request file collisions.
+    if config.debug:
+        try:
+            shutil.copy2(chunk_paths[-1], "/tmp/last_chunk_audio.mp3")
+            _debug("transcribe", "Saved last chunk audio to /tmp/last_chunk_audio.mp3")
+        except Exception as exc:
+            import sys
 
-    try:
-        with open("/tmp/last_chunk_transcription.txt", "w") as f:
-            f.write(texts[-1])
-        _debug("transcribe", f"Saved last chunk transcription to /tmp/last_chunk_transcription.txt")
-    except Exception as exc:
-        import sys
-        print(f"Failed to save last chunk transcription: {exc}", file=sys.stderr)
+            print(f"Failed to save last chunk audio: {exc}", file=sys.stderr)
+
+        try:
+            with open("/tmp/last_chunk_transcription.txt", "w") as f:
+                f.write(texts[-1])
+            _debug(
+                "transcribe",
+                "Saved last chunk transcription to /tmp/last_chunk_transcription.txt",
+            )
+        except Exception as exc:
+            import sys
+
+            print(f"Failed to save last chunk transcription: {exc}", file=sys.stderr)
 
     # Deduplicate overlap text at boundaries between adjacent chunks.
     joined = texts[0]
@@ -760,7 +813,10 @@ def _cache_get(video_id: str, ttl_days: int) -> dict | None:
 
     text, source, model, created_at = row
     try:
-        created_dt = datetime.fromisoformat(created_at)
+        # SQLite datetime('now') produces "YYYY-MM-DD HH:MM:SS" (space‑separated).
+        # strptime works on all Python versions; fromisoformat only accepts the
+        # space separator since Python 3.11 so we avoid it for portability.
+        created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
     now = datetime.now(timezone.utc)
@@ -852,7 +908,9 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
             list_output = ""
 
         # Parse available subtitle languages (may be empty if --list-subs failed).
-        manual_langs, auto_langs = _parse_subtitle_langs(list_output) if list_output else (set(), set())
+        manual_langs, auto_langs = (
+            _parse_subtitle_langs(list_output) if list_output else (set(), set())
+        )
         _debug(
             "subs",
             f"Available — manual: {sorted(manual_langs) or 'none'}, "
@@ -897,7 +955,9 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
             text = _parse_subtitle_text(sub_path)
             _debug("transcript", f"Extracted {len(text)} chars from subtitles")
             if config.cache_enabled and video_id is not None:
-                _cache_put(video_id, url, text, "subtitles", "yt-dlp", config.cache_ttl_days)
+                _cache_put(
+                    video_id, url, text, "subtitles", "yt-dlp", config.cache_ttl_days
+                )
                 _debug("cache", f"stored video_id={video_id} source=subtitles")
             return {
                 "text": text,
@@ -951,7 +1011,9 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
             raise
 
         if config.cache_enabled and video_id is not None:
-            _cache_put(video_id, url, text, "transcription", model, config.cache_ttl_days)
+            _cache_put(
+                video_id, url, text, "transcription", model, config.cache_ttl_days
+            )
             _debug("cache", f"stored video_id={video_id} source=transcription")
 
         return {

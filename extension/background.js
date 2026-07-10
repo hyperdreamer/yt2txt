@@ -145,6 +145,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   chrome.storage.local
     .remove([
       `transcript:${tabId}`,
+      `transcript_raw:${tabId}`,
       `status:${tabId}`,
       `tl2Result:${tabId}`,
       `tl2Language:${tabId}`,
@@ -240,18 +241,17 @@ async function getActiveTab() {
 
 // ── Fetch with timeout ──────────────────────────────────────────
 async function fetchWithTimeout(url, options = {}, signal) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
-
+  // When the caller provides its own AbortController signal, use it
+  // directly so there is exactly one source of abort (and therefore
+  // one AbortError).  The caller is responsible for timeout management
+  // via its own setTimeout + controller.abort() pattern.
   if (signal) {
-    if (signal.aborted) {
-      controller.abort();
-      clearTimeout(timeoutId);
-    } else {
-      signal.addEventListener('abort', () => controller.abort(), { once: true });
-    }
+    return fetch(url, { ...options, signal });
   }
 
+  // No external signal — create our own timeout with a default deadline.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
   try {
     return await fetch(url, { ...options, signal: controller.signal });
   } finally {
@@ -565,8 +565,17 @@ async function handleFormatStart(msg) {
 
       const formatted = payload.text || '';
       await chrome.storage.local.set({ [`fmtResult:${tabId}`]: formatted });
-      // Replace the transcript with formatted text
-      await chrome.storage.local.set({ [`transcript:${tabId}`]: formatted });
+      // Replace the transcript with formatted text, preserving the URL from
+      // the original transcript entry so popup init() can still validate it.
+      const existingEntry = await chrome.storage.local.get(`transcript:${tabId}`);
+      const originalUrl =
+        existingEntry[`transcript:${tabId}`] &&
+        typeof existingEntry[`transcript:${tabId}`] === 'object'
+          ? existingEntry[`transcript:${tabId}`].url || ''
+          : '';
+      await chrome.storage.local.set({
+        [`transcript:${tabId}`]: { text: formatted, url: originalUrl },
+      });
       chrome.runtime
         .sendMessage({ type: 'format:update', tabId, text: formatted })
         .catch(() => {});
@@ -676,13 +685,23 @@ async function autoSaveIfEnabled(text) {
 }
 
 // ── Auto-format helper ─────────────────────────────────────────
+async function _fetchWithShortTimeout(url) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function autoFormatIfEnabled(tabId, text, host, port) {
   // Try to get format prompt from textkit backend, fall back to local, then default
   let formatPrompt = '';
   try {
     const tkHost = host || DEFAULT_HOST;
     const tkPort = port || DEFAULT_TEXTKIT_PORT;
-    const resp = await fetch(`http://${tkHost}:${tkPort}/prompts/format`);
+    const resp = await _fetchWithShortTimeout(`http://${tkHost}:${tkPort}/prompts/format`);
     if (resp.ok) {
       const data = await resp.json();
       formatPrompt = data.template || '';

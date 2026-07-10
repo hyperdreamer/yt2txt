@@ -163,7 +163,13 @@ chrome.runtime.onMessage.addListener((message) => {
 // ── Init ───────────────────────────────────────────────────────
 async function init() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  currentTabId = tab?.id || null;
+  const newTabId = tab?.id || null;
+  // Reset user-edited flag when switching tabs so the new tab's
+  // transcript populates the textarea instead of being blocked.
+  if (newTabId !== currentTabId) {
+    userEditedResult = false;
+  }
+  currentTabId = newTabId;
 
   // Load settings
   const items = await chrome.storage.sync.get({
@@ -306,13 +312,33 @@ function saveTranslatePrompt() {
   chrome.storage.local.set({ [`translatePrompt:${lang}`]: translatePrompt.value });
 }
 
+// ── Lightweight TextKit fetches (popup → backend) ─────────────────
+// These prompt / path fetches intentionally call fetch() directly from
+// the popup instead of routing through the background service worker.
+// Rationale:
+//   - These are low-stakes read-only config fetches, not long-running
+//     operations like transcription, translation, or formatting.
+//   - Route-through-SW would add message-passing latency, which is
+//     noticeable for interactive UX (path autocomplete with debounce).
+//   - Failures are non-critical: the popup falls back to local storage.
+//   - A short (10 s) timeout prevents them from blocking the UI.
+async function _popupFetch(url) {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    return await fetch(url, { signal: ctrl.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 async function loadTranslatePromptForLanguage() {
   const lang = tl2Language.value;
   // Try textkit backend first (source of truth for prompts)
   try {
     const host = textkitHostInput.value.trim() || 'localhost';
     const port = parseInt(textkitPortInput.value, 10) || 8765;
-    const resp = await fetch(`http://${host}:${port}/prompts/translate?language=${encodeURIComponent(lang)}`);
+    const resp = await _popupFetch(`http://${host}:${port}/prompts/translate?language=${encodeURIComponent(lang)}`);
     if (resp.ok) {
       const data = await resp.json();
       translatePrompt.value = data.template || '';
@@ -336,7 +362,7 @@ async function fetchPathSuggestions(prefix) {
   try {
     const host = textkitHostInput.value.trim() || 'localhost';
     const port = parseInt(textkitPortInput.value, 10) || 8765;
-    const resp = await fetch(`http://${host}:${port}/paths?prefix=${encodeURIComponent(prefix)}`);
+    const resp = await _popupFetch(`http://${host}:${port}/paths?prefix=${encodeURIComponent(prefix)}`);
     const data = await resp.json().catch(() => ({}));
     const paths = data.paths || [];
     // If user typed a ~ prefix, prepend ~/ so the browser's <datalist>
@@ -480,7 +506,7 @@ async function retryFormat() {
   // Try loading format prompt from textkit backend first
   let fmtPrompt = '';
   try {
-    const resp = await fetch(`http://${host}:${port}/prompts/format`);
+    const resp = await _popupFetch(`http://${host}:${port}/prompts/format`);
     if (resp.ok) {
       const data = await resp.json();
       fmtPrompt = data.template || '';
@@ -541,8 +567,10 @@ async function doTranslation() {
       host,
       port,
     });
-  } catch {
-    // Background will broadcast status
+  } catch (e) {
+    // sendMessage itself failed (SW terminated, context invalidated, etc.)
+    setTl2Progress(`Failed to start translation: ${e.message || 'unknown error'}`);
+    tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = false;
   }
 }
 
