@@ -270,6 +270,18 @@ function saveTranslatePrompt() {
 
 async function loadTranslatePromptForLanguage() {
   const lang = tl2Language.value;
+  // Try textkit backend first (source of truth for prompts)
+  try {
+    const host = textkitHostInput.value.trim() || 'localhost';
+    const port = parseInt(textkitPortInput.value, 10) || 8765;
+    const resp = await fetch(`http://${host}:${port}/prompts/translate?language=${encodeURIComponent(lang)}`);
+    if (resp.ok) {
+      const data = await resp.json();
+      translatePrompt.value = data.template || '';
+      return;
+    }
+  } catch {}
+  // Fallback to local storage
   const stored = await chrome.storage.local.get([`translatePrompt:${lang}`]);
   translatePrompt.value = stored[`translatePrompt:${lang}`] || '';
 }
