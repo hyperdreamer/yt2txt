@@ -4,14 +4,19 @@ A Chrome Manifest V3 extension + FastAPI backend that extracts transcripts from 
 
 **Two paths:**
 1. **Native subtitles available** → downloaded directly via yt-dlp (fast, free).
-2. **No subtitles** → audio is downloaded and transcribed via OpenAI's `gpt-4o-transcribe` or `gpt-4o-min-transcribe`.
+2. **No subtitles** → audio is downloaded and transcribed via OpenAI-compatible API (`gpt-4o-transcribe` or `gpt-4o-min-transcribe`).
+
+**Two-tab UI:**
+- **Transcript tab** — language selection, transcript extraction, formatting
+- **Translation tab** — translate transcripts with configurable prompts, auto-copy/auto-save
 
 ## Prerequisites
 
 - Python 3.10+
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`pip install yt-dlp`)
 - Chrome or Chromium browser
-- OpenAI API key (for transcription; free if video has subtitles)
+- OpenAI-compatible API key (for transcription and formatting; free if video has subtitles)
+- [TextKit](https://github.com/hyperdreamer/textkit) backend (for translation and formatting)
 
 ## Setup
 
@@ -28,7 +33,7 @@ pip install -r requirements.txt
 cp config.example.yaml config.yaml
 ```
 
-Edit `config.yaml` and set your OpenAI API key:
+Edit `config.yaml` and set your API key:
 
 ```yaml
 ai:
@@ -59,13 +64,26 @@ The server starts on `http://127.0.0.1:8666` by default.
 
 ## Usage
 
-### From the popup
+### Transcript tab
 
 1. Navigate to a video page (YouTube, Vimeo, etc.)
-2. Click the YT2TXT icon — the current page URL is pre-filled
+2. Select the language for subtitles / transcription hint
 3. Click **Get Transcript**
 4. Watch the status bar — it will show progress (checking subtitles → downloading audio → transcribing)
-5. Copy or download the result
+5. **Format** the result with AI for improved readability
+6. Copy or download
+
+If the selected language isn't available in subtitles, the extension falls back to:
+- **Subtitles**: the video's original language (yt-dlp default)
+- **Transcription**: auto-detection (no language hint passed to API)
+
+### Translation tab
+
+1. Select a target language
+2. Optionally customize the translation prompt
+3. Click **Translate** — or enable **Auto-translate** to translate automatically after extraction
+4. Enable **Auto-copy** / **Auto-save** for hands-off workflow
+5. When the transcript language matches the target, no API call is made — text passes through directly
 
 ### Keyboard shortcut
 
@@ -84,7 +102,9 @@ Returns `{"status": "ok"}`.
 ```json
 {
   "url": "https://www.youtube.com/watch?v=...",
-  "model": "gpt-4o-transcribe"  // optional, defaults to config
+  "language": "en",                  // optional, for subtitle selection + transcription hint
+  "model": "gpt-4o-transcribe",      // optional, defaults to config
+  "force": false                     // optional, bypass cache
 }
 ```
 
@@ -103,15 +123,16 @@ Response:
 ```
 extension/          ← Chrome MV3 extension
   manifest.json
-  background.js     ← service worker (all API calls)
-  popup.html        ← popup UI
-  popup.js          ← popup logic
+  background.js     ← service worker (all API calls, translation, formatting)
+  popup.html        ← popup UI (Transcript + Translation tabs)
+  popup.js          ← popup logic, delegates to background via messages
+  icons/             ← icon16.png, icon48.png, icon128.png
 
 backend/            ← FastAPI backend
-  main.py           ← FastAPI app
+  main.py           ← FastAPI app with /transcript and /health
   config.yaml       ← live config (gitignored)
   config.example.yaml ← committed example
   requirements.txt
 ```
 
-The extension never calls `fetch()` from the popup — all API requests go through the background service worker, which survives popup closes.
+The extension never calls `fetch()` from the popup for transcript/translation/format — all long-running API requests go through the background service worker, which survives popup closes.
