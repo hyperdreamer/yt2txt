@@ -172,6 +172,7 @@ class TranscriptRequest(BaseModel):
     url: str
     model: str | None = None
     language: str = ""
+    force: bool = False
 
 
 class TranscriptResponse(BaseModel):
@@ -810,16 +811,19 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
     video_id: str | None = None
     if config.cache_enabled:
         video_id = await _extract_video_id(url)
-        cached = _cache_get(video_id, config.cache_ttl_days)
-        if cached:
-            _debug("cache", f"hit video_id={video_id} source={cached['source']}")
-            return {
-                "text": cached["text"],
-                "source": cached["source"],
-                "model": cached["model"],
-                "error": None,
-            }
-        _debug("cache", f"miss video_id={video_id}")
+        if not req.force:
+            cached = _cache_get(video_id, config.cache_ttl_days)
+            if cached:
+                _debug("cache", f"hit video_id={video_id} source={cached['source']}")
+                return {
+                    "text": cached["text"],
+                    "source": cached["source"],
+                    "model": cached["model"],
+                    "error": None,
+                }
+            _debug("cache", f"miss video_id={video_id}")
+        else:
+            _debug("cache", f"force refresh video_id={video_id}")
 
     # ── Try subtitles first ──────────────────────────────────
     with tempfile.TemporaryDirectory() as tmpdir:

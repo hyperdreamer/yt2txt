@@ -9,6 +9,7 @@ const downloadBtn = document.getElementById('download');
 const hostInput = document.getElementById('host');
 const portInput = document.getElementById('port');
 const langSelect = document.getElementById('lang');
+const forceCheckbox = document.getElementById('force');
 
 // ── State ──────────────────────────────────────────────────────
 let latestState = null;
@@ -112,6 +113,7 @@ async function startCapture() {
 
   startBtn.disabled = true;
   stopBtn.classList.remove('hidden');
+  forceCheckbox.disabled = true;
   statusBar.textContent = 'Starting...';
   statusBar.className = '';
 
@@ -120,17 +122,21 @@ async function startCapture() {
       type: 'popup:start',
       url,
       lang: langSelect.value,
+      force: forceCheckbox.checked,
     });
+    forceCheckbox.checked = false;
     if (!response?.ok) {
       statusBar.textContent = response?.error || 'Failed to start.';
       statusBar.className = 'error';
       startBtn.disabled = false;
+      forceCheckbox.disabled = false;
       stopBtn.classList.add('hidden');
     }
   } catch (e) {
     statusBar.textContent = e.message || 'Failed to start.';
     statusBar.className = 'error';
     startBtn.disabled = false;
+    forceCheckbox.disabled = false;
     stopBtn.classList.add('hidden');
   }
 }
@@ -193,6 +199,7 @@ function renderState(state) {
 
   // Buttons
   startBtn.disabled = isActive;
+  forceCheckbox.disabled = isActive;
   stopBtn.classList.toggle('hidden', !isActive);
 
   updateResultButtons();
