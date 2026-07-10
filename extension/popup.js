@@ -566,6 +566,7 @@ async function doTranslation() {
       text,
       language,
       sourceUrl: urlInput.value,
+      sourceLang: langSelect.value,
       host,
       port,
     });

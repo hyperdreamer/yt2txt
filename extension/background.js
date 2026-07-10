@@ -6,6 +6,13 @@ const BACKEND_TIMEOUT_MS = 12 * 60 * 1000; // 12 minutes (translation/format may
 const TRANSCRIPT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 const LOCAL_BACKEND_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
+// Map transcript language codes to translation target names.
+// When source == target, no API call is needed — just pass through.
+const LANG_CODE_TO_NAME = {
+  en: 'English', zh: 'Chinese', ja: 'Japanese', ko: 'Korean',
+  es: 'Spanish', fr: 'French', de: 'German',
+};
+
 // ── Backend URL cache (yt2txt) ──────────────────────────────────
 let _yt2txtBaseUrl = null;
 let _yt2txtBaseUrlExpiry = 0;
@@ -361,7 +368,7 @@ async function handleStart(msg) {
   if (resultText) {
     // Cache original transcript before formatting (for retry on format failure)
     await chrome.storage.local.set({ [`transcript_raw:${tab.id}`]: resultText });
-    try { await autoTranslate(tab.id, resultText, msg.url); } catch (e) { console.error('autoTranslate failed:', e); }
+    try { await autoTranslate(tab.id, resultText, msg.url, msg.lang); } catch (e) { console.error('autoTranslate failed:', e); }
     try { await autoFormatIfEnabled(tab.id, resultText); } catch (e) { console.error('autoFormatIfEnabled failed:', e); }
   }
 
@@ -434,6 +441,22 @@ async function handleTranslateStart(msg) {
         if (translated) autoCopyIfEnabled(translated);
         if (translated) autoSaveIfEnabled(translated);
         if (translated) autoFormatIfEnabled(tabId, translated, host, port);
+        return { ok: true };
+      }
+
+      // If the transcript language matches the translation target,
+      // no API call is needed — just pass through and auto-save/copy.
+      const sourceName = LANG_CODE_TO_NAME[msg.sourceLang];
+      if (sourceName && sourceName.toLowerCase() === language.toLowerCase()) {
+        await chrome.storage.local.set({
+          [`tl2Result:${tabId}`]: { text, sourceUrl: msg.sourceUrl || '', language },
+        });
+        chrome.runtime
+          .sendMessage({ type: 'translation:update', tabId, text, sourceUrl: msg.sourceUrl })
+          .catch(() => {});
+        if (text) autoCopyIfEnabled(text);
+        if (text) autoSaveIfEnabled(text);
+        if (text) autoFormatIfEnabled(tabId, text, host, port);
         return { ok: true };
       }
 
@@ -734,7 +757,7 @@ async function autoFormatIfEnabled(tabId, text, host, port) {
 }
 
 // ── Auto-translate helper (called from handleStart) ────────────
-async function autoTranslate(tabId, text, sourceUrl) {
+async function autoTranslate(tabId, text, sourceUrl, sourceLang) {
   const { yt2txtAutoTranslate } = await chrome.storage.sync.get({
     yt2txtAutoTranslate: false,
   });
@@ -762,6 +785,7 @@ async function autoTranslate(tabId, text, sourceUrl) {
     text,
     language,
     sourceUrl,
+    sourceLang,
     host: backend.textkitHost,
     port: backend.textkitPort,
   }).catch((e) => console.error('autoTranslate failed:', e));
