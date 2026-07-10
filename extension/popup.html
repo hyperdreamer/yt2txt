@@ -6,7 +6,7 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      width: 400px;
+      width: 450px;
       font-family: system-ui, -apple-system, sans-serif;
       font-size: 13px;
       background: #0f172a;
@@ -194,6 +194,50 @@
     .option-row label { color: #94a3b8; font-size: 12px; cursor: pointer; white-space: nowrap; }
     .option-row input { cursor: pointer; }
 
+    /* ── Format / Translation panel labels ─────────────────── */
+    .panel-label {
+      display: block;
+      font-size: 11px;
+      color: #94a3b8;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+    .panel-header h1 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #38bdf8;
+      margin-bottom: 10px;
+    }
+
+    /* Format / Translation textareas (shared) */
+    #format-source, #format-prompt, #format-result,
+    #tl-source, #tl-prompt, #tl-result {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      background: #1e293b;
+      color: #e2e8f0;
+      font-size: 12px;
+      line-height: 1.5;
+      font-family: inherit;
+      box-sizing: border-box;
+      margin-bottom: 8px;
+    }
+    #format-source:focus, #format-prompt:focus, #format-result:focus,
+    #tl-source:focus, #tl-prompt:focus, #tl-result:focus {
+      border-color: #38bdf8;
+      outline: none;
+    }
+    #format-source  { height: 100px; resize: vertical; }
+    #format-prompt  { min-height: 60px; resize: vertical; }
+    #format-result  { height: 120px; resize: vertical; }
+    #tl-source      { height: 100px; resize: vertical; }
+    #tl-prompt      { min-height: 60px; resize: vertical; }
+    #tl-result      { height: 120px; resize: vertical; }
+    #format-panel .collapsible { margin-bottom: 8px; }
+    #translate-panel .collapsible { margin-bottom: 8px; }
+
     /* Full-width save path */
     .save-path-label {
       display: block; color: #94a3b8; font-size: 11px; margin-bottom: 8px;
@@ -273,17 +317,29 @@
       .save-path-label input:focus { border-color: #0284c7; }
 
       .force-label { color: #64748b; }
+
+      #format-source, #format-prompt, #format-result,
+      #tl-source, #tl-prompt, #tl-result {
+        border-color: #cbd5e1; background: #ffffff; color: #0f172a;
+      }
+      #format-source:focus, #format-prompt:focus, #format-result:focus,
+      #tl-source:focus, #tl-prompt:focus, #tl-result:focus {
+        border-color: #0284c7;
+      }
+      .panel-header h1 { color: #0284c7; }
+      .panel-label { color: #64748b; }
     }
   </style>
 </head>
 <body>
   <div class="header">
     <h1>YT2TXT</h1>
-    <span class="version">v0.0.27</span>
+    <span class="version">v0.0.28</span>
   </div>
 
   <div class="tab-bar">
     <button class="tab active" data-panel="transcript-panel">Transcript</button>
+    <button class="tab" data-panel="format-panel">Format</button>
     <button class="tab" data-panel="translation-panel">Translation</button>
   </div>
 
@@ -338,7 +394,27 @@
     <div class="result-actions">
       <button id="copy" class="secondary" disabled>Copy</button>
       <button id="download" class="secondary" disabled>Download</button>
-      <button id="format-retry" class="primary" disabled>Format</button>
+    </div>
+  </div>
+
+  <div id="format-panel" class="panel hidden">
+    <div class="panel-header">
+      <h1>Format Transcript</h1>
+    </div>
+    <label class="panel-label" for="format-source">Source Text</label>
+    <textarea id="format-source" placeholder="Paste or auto-filled from Transcript tab..."></textarea>
+    <details class="collapsible">
+      <summary>Formatting Instructions (optional)</summary>
+      <textarea id="format-prompt" placeholder="E.g.: Format this transcript into well-structured paragraphs..."></textarea>
+    </details>
+    <div class="actions">
+      <button id="format-btn" class="primary" disabled>Format</button>
+    </div>
+    <div id="format-status-bar" class="status-bar">Ready</div>
+    <label class="panel-label" for="format-result">Formatted Result</label>
+    <textarea id="format-result" readonly placeholder="Formatted text will appear here..."></textarea>
+    <div class="result-actions">
+      <button id="format-copy" class="secondary" disabled>Copy</button>
     </div>
   </div>
 

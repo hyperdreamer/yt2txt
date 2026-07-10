@@ -60,6 +60,10 @@ class AppConfig:
     api_base: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = DEFAULT_MODEL
+    # Text-to-text models used by /format and /translate. Empty string
+    # means "fall back to model" (resolved at use site).
+    format_model: str = ""
+    translate_model: str = ""
     cache_enabled: bool = True
     cache_ttl_days: int = 30
 
@@ -92,13 +96,19 @@ def load_config() -> AppConfig:
     if not isinstance(cache_section, dict):
         cache_section = {}
 
+    model = str(ai_section.get("model", DEFAULT_MODEL))
+    format_model = str(ai_section.get("format_model", "") or "") or model
+    translate_model = str(ai_section.get("translate_model", "") or "") or model
+
     return AppConfig(
         host=str(raw.get("host", DEFAULT_HOST)),
         port=int(raw.get("port", DEFAULT_PORT)),
         debug=bool(raw.get("debug", False)),
         api_base=api_base,
         api_key=api_key,
-        model=str(ai_section.get("model", DEFAULT_MODEL)),
+        model=model,
+        format_model=format_model,
+        translate_model=translate_model,
         cache_enabled=bool(cache_section.get("enabled", True)),
         cache_ttl_days=int(cache_section.get("ttl_days", 30)),
     )
@@ -106,7 +116,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.27")
+app = FastAPI(title="YT2TXT", version="0.0.28")
 
 
 # ── Config (cached) ────────────────────────────────────────────────
@@ -1029,6 +1039,220 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
             "model": model,
             "error": None,
         }
+
+
+# ── Text-to-text endpoints (/format, /translate) ──────────────
+
+
+# Map ISO 639-1 (or short) language codes to human-readable names for
+# the translation system prompt. Unknown codes are passed through verbatim.
+LANG_CODE_TO_NAME: dict[str, str] = {
+    "zh": "Chinese",
+    "en": "English",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "ru": "Russian",
+    "ar": "Arabic",
+    "pt": "Portuguese",
+    "hi": "Hindi",
+}
+
+
+class FormatRequest(BaseModel):
+    text: str
+    prompt: str = ""
+
+
+class TextToTextResponse(BaseModel):
+    text: str = ""
+    model: str = ""
+    error: str | None = None
+
+
+class TranslateRequest(BaseModel):
+    text: str
+    target_language: str = "zh"
+    prompt: str = ""
+
+
+async def _chat_completion(
+    config: AppConfig,
+    model: str,
+    system_prompt: str,
+    user_text: str,
+    custom_prompt: str = "",
+    timeout: float = 300.0,
+) -> str:
+    """Send a chat completion request to the OpenAI-compatible API.
+
+    Combines *system_prompt* and an optional *custom_prompt* into a single
+    system message, then asks the configured model to process *user_text*.
+    Returns the assistant's text response. Raises HTTPException on
+    connection errors, timeouts, or non-2xx responses.
+    """
+    if not config.api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="No API key configured. Set OPENAI_API_KEY or ai.api_key in config.yaml.",
+        )
+    if not model:
+        raise HTTPException(
+            status_code=500,
+            detail="No chat model configured. Set ai.format_model / ai.translate_model in config.yaml.",
+        )
+
+    system_message = system_prompt
+    if custom_prompt and custom_prompt.strip():
+        system_message = f"{system_prompt}\n\nAdditional instructions: {custom_prompt.strip()}"
+
+    # Sanitize model name to prevent header injection if the value
+    # somehow contains CR/LF (defensive — config is normally trusted).
+    safe_model = model.replace("\r", "").replace("\n", "")
+
+    url = f"{config.api_base}/chat/completions"
+    body = {
+        "model": safe_model,
+        "messages": [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_text},
+        ],
+        "temperature": 0.3,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {config.api_key}",
+        "Content-Type": "application/json",
+    }
+
+    deadline = timeout
+    last_exc: Exception | None = None
+    for attempt in (1, 2):
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=10.0, read=deadline, write=60.0, pool=10.0
+                )
+            ) as client:
+                response = await asyncio.wait_for(
+                    client.post(url, headers=headers, json=body),
+                    timeout=deadline,
+                )
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail=f"Chat completion API did not respond within {deadline}s",
+            )
+        except httpx.ConnectError as exc:
+            last_exc = exc
+            if attempt == 1:
+                await asyncio.sleep(1)
+                continue
+            raise HTTPException(
+                status_code=502,
+                detail=f"Chat completion API connection failed: {exc}",
+            ) from exc
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Chat completion API request failed: {type(exc).__name__}: {exc}",
+            ) from exc
+        else:
+            if response.is_error:
+                detail = response.text
+                if PRODUCTION:
+                    detail = "Chat completion API returned an error"
+                elif len(detail) > 500:
+                    detail = detail[:500] + "..."
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Chat completion API failed: {detail}",
+                )
+            payload = response.json()
+            try:
+                choices = payload["choices"]
+                content = choices[0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Chat completion API returned an unexpected payload: {exc}",
+                ) from exc
+            if not isinstance(content, str):
+                content = str(content)
+            return content.strip()
+
+    if last_exc is None:
+        raise RuntimeError(
+            "Retry loop exhausted but no exception was captured — "
+            "this should never happen."
+        )
+    raise HTTPException(
+        status_code=502,
+        detail=f"Chat completion API connection failed: {last_exc}",
+    )
+
+
+@app.post("/format")
+async def format_text(req: FormatRequest) -> dict[str, Any]:
+    """Reformat / clean up a transcript using a chat-completion model."""
+    if not req.text or not isinstance(req.text, str) or not req.text.strip():
+        raise HTTPException(status_code=400, detail="text is required")
+
+    config = get_config()
+    model = config.format_model or config.model
+    system_prompt = (
+        "You are a transcript formatter. Clean up the following transcript "
+        "into well-structured text with proper paragraphs, punctuation, and "
+        "capitalization. Preserve all content and the original language. "
+        "Output ONLY the cleaned text — no commentary, no preamble."
+    )
+
+    _debug("format", f"Formatting {len(req.text)} chars with model {model}")
+    try:
+        result = await _chat_completion(
+            config,
+            model,
+            system_prompt,
+            req.text,
+            req.prompt or "",
+        )
+    except HTTPException:
+        raise
+    return {"text": result, "model": model, "error": None}
+
+
+@app.post("/translate")
+async def translate_text(req: TranslateRequest) -> dict[str, Any]:
+    """Translate text to a target language using a chat-completion model."""
+    if not req.text or not isinstance(req.text, str) or not req.text.strip():
+        raise HTTPException(status_code=400, detail="text is required")
+    if not req.target_language or not isinstance(req.target_language, str) or not req.target_language.strip():
+        raise HTTPException(status_code=400, detail="target_language is required")
+
+    config = get_config()
+    model = config.translate_model or config.model
+    target = req.target_language.strip()
+    target_name = LANG_CODE_TO_NAME.get(target.lower(), target)
+    system_prompt = (
+        f"You are a translator. Translate the following text to {target_name}. "
+        "Preserve formatting, paragraph breaks, and structure. "
+        "Output ONLY the translation — no commentary, no preamble."
+    )
+
+    _debug("translate", f"Translating {len(req.text)} chars → {target_name} with model {model}")
+    try:
+        result = await _chat_completion(
+            config,
+            model,
+            system_prompt,
+            req.text,
+            req.prompt or "",
+        )
+    except HTTPException:
+        raise
+    return {"text": result, "model": model, "error": None}
 
 
 # ── Run ─────────────────────────────────────────────────────────

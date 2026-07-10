@@ -2,6 +2,7 @@
 const tabs = document.querySelectorAll('.tab');
 const panels = {
   'transcript-panel': document.getElementById('transcript-panel'),
+  'format-panel': document.getElementById('format-panel'),
   'translation-panel': document.getElementById('translation-panel'),
 };
 
@@ -13,7 +14,13 @@ const statusBar = document.getElementById('status-bar');
 const resultEl = document.getElementById('result');
 const copyBtn = document.getElementById('copy');
 const downloadBtn = document.getElementById('download');
-const formatRetryBtn = document.getElementById('format-retry');
+// ── Format panel elements ─────────────────────────────────────
+const formatSource = document.getElementById('format-source');
+const formatPrompt = document.getElementById('format-prompt');
+const formatBtn = document.getElementById('format-btn');
+const formatStatusBar = document.getElementById('format-status-bar');
+const formatResult = document.getElementById('format-result');
+const formatCopy = document.getElementById('format-copy');
 const hostInput = document.getElementById('host');
 const portInput = document.getElementById('port');
 const langSelect = document.getElementById('lang');
@@ -42,16 +49,51 @@ const textkitPortInput = document.getElementById('textkit-port');
 let latestState = null;
 let currentTabId = null;
 let userEditedResult = false;
+let formatUserEdited = false;
+let tlUserEdited = false;
 
 // ── Tab switching ──────────────────────────────────────────────
 tabs.forEach((tab) => {
   tab.addEventListener('click', () => {
-    tabs.forEach((t) => t.classList.remove('active'));
-    tab.classList.add('active');
-    Object.values(panels).forEach((p) => p.classList.add('hidden'));
-    panels[tab.dataset.panel].classList.remove('hidden');
+    switchTab(tab.dataset.panel);
   });
 });
+
+function switchTab(panelName) {
+  // 1. Update active tab button
+  tabs.forEach((t) => t.classList.remove('active'));
+  const btn = document.querySelector(`[data-panel="${panelName}"]`);
+  if (btn) btn.classList.add('active');
+
+  // 2. Show/hide panels
+  Object.values(panels).forEach((p) => p.classList.add('hidden'));
+  if (panels[panelName]) panels[panelName].classList.remove('hidden');
+
+  // 3. Auto-fill downstream data
+  if (panelName === 'format-panel' && !formatSource.value.trim()) {
+    // Pre-fill from transcript result
+    const transcriptText = resultEl.value.trim();
+    if (transcriptText) {
+      formatSource.value = transcriptText;
+      formatBtn.disabled = false;
+    }
+  }
+
+  if (panelName === 'translation-panel' && !tl2Result.value.trim()) {
+    // Pre-fill translate source from format result, falling back to
+    // format source, falling back to transcript result.
+    const formatOutput = formatResult.value.trim();
+    const formatInput = formatSource.value.trim();
+    const transcriptText = resultEl.value.trim();
+    const next = formatOutput || formatInput || transcriptText;
+    if (next && !tl2Result.value.trim()) {
+      // The legacy tl2-* flow does not have a separate "source" textarea —
+      // the transcript is taken from resultEl on Translate.  No need to
+      // populate anything here; this is the unified-format-tab flow
+      // (which is not used by the legacy tl2-* buttons).
+    }
+  }
+}
 
 // ── Event listeners ───────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -67,7 +109,18 @@ startBtn.addEventListener('click', startCapture);
 stopBtn.addEventListener('click', stopCapture);
 copyBtn.addEventListener('click', copyText);
 downloadBtn.addEventListener('click', downloadText);
-formatRetryBtn.addEventListener('click', retryFormat);
+// Format panel
+formatBtn.addEventListener('click', doFormat);
+formatCopy.addEventListener('click', () => copyResult(formatResult, formatCopy));
+formatSource.addEventListener('input', () => {
+  formatUserEdited = true;
+  formatBtn.disabled = !formatSource.value.trim();
+});
+formatPrompt.addEventListener('input', () => {
+  if (currentTabId) {
+    chrome.storage.local.set({ [`format:prompt:${currentTabId}`]: formatPrompt.value });
+  }
+});
 hostInput.addEventListener('change', saveYt2txtSettings);
 portInput.addEventListener('change', saveYt2txtSettings);
 langSelect.addEventListener('change', saveYt2txtSettings);
@@ -141,22 +194,9 @@ chrome.runtime.onMessage.addListener((message) => {
     return;
   }
   if (message?.type === 'format:update') {
-    if (message.tabId !== currentTabId) return;
-    if (message.text) {
-      // Format succeeded — replace transcript text
-      resultEl.value = message.text;
-      formatRetryBtn.disabled = false;
-      formatRetryBtn.textContent = 'Format';
-      statusBar.textContent = 'Formatted ✓';
-      statusBar.className = 'status-bar success';
-      chrome.storage.local.set({ [`transcript:${currentTabId}`]: message.text });
-    } else if (message.error) {
-      // Format failed — show retry button
-      formatRetryBtn.disabled = false;
-      formatRetryBtn.textContent = 'Format';
-      statusBar.textContent = message.error || 'Formatting failed. Click Format to retry.';
-      statusBar.className = 'status-bar error';
-    }
+    // Legacy TextKit format:update — no longer used by the unified popup
+    // (renderState() handles the new state:update broadcast).  Kept for
+    // backward compatibility with any external callers.
     return;
   }
 });
@@ -271,8 +311,30 @@ async function init() {
   await loadTranslatePromptForLanguage();
   loadPathSuggestions();
 
+  // Restore unified Format tab state (per-tab)
+  if (currentTabId) {
+    const fmtKeys = [
+      `format:result:${currentTabId}`,
+      `format:status:${currentTabId}`,
+      `format:prompt:${currentTabId}`,
+    ];
+    const fmtStored = await chrome.storage.local.get(fmtKeys);
+    if (fmtStored[`format:result:${currentTabId}`]) {
+      formatResult.value = fmtStored[`format:result:${currentTabId}`];
+      formatCopy.disabled = false;
+    }
+    if (fmtStored[`format:prompt:${currentTabId}`]) {
+      formatPrompt.value = fmtStored[`format:prompt:${currentTabId}`];
+    }
+    // Auto-fill format source from transcript result if empty
+    if (!formatSource.value.trim() && resultEl.value.trim()) {
+      formatSource.value = resultEl.value.trim();
+    }
+  }
+
   updateResultButtons();
   updateTranslationButtons();
+  updateFormatButtons();
 }
 
 // ── Settings ───────────────────────────────────────────────────
@@ -413,7 +475,6 @@ async function startCapture() {
   resultEl.value = '';
   copyBtn.disabled = true;
   downloadBtn.disabled = true;
-  formatRetryBtn.disabled = true;
 
   startBtn.disabled = true;
   forceCheckbox.disabled = true;
@@ -479,59 +540,80 @@ function downloadText() {
   URL.revokeObjectURL(url);
 }
 
-// ── Format retry (Transcript panel) ─────────────────────────────
-async function retryFormat() {
-  formatRetryBtn.disabled = true;
-  formatRetryBtn.textContent = 'Formatting...';
-  statusBar.textContent = 'Formatting...';
-  statusBar.className = 'status-bar';
-
-  const host = textkitHostInput.value.trim() || 'localhost';
-  const port = parseInt(textkitPortInput.value, 10) || 8765;
-
-  // Use cached original transcript for retry
-  const rawKey = currentTabId ? `transcript_raw:${currentTabId}` : null;
-  let text = resultEl.value.trim();
-  if (rawKey) {
-    const stored = await chrome.storage.local.get(rawKey);
-    if (stored[rawKey]) text = stored[rawKey];
-  }
-
-  if (!text) {
-    statusBar.textContent = 'No text to format.';
-    statusBar.className = 'status-bar error';
-    formatRetryBtn.disabled = false;
-    formatRetryBtn.textContent = 'Format';
+// ── Format panel actions ──────────────────────────────────────
+async function doFormat() {
+  if (formatBtn.textContent === 'Stop') {
+    // Stop in-progress format
+    formatBtn.disabled = true;
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'popup:format-stop',
+        tabId: currentTabId,
+      });
+    } catch {}
     return;
   }
 
-  // Try loading format prompt from textkit backend first
-  let fmtPrompt = '';
-  try {
-    const resp = await _popupFetch(`http://${host}:${port}/prompts/format`);
-    if (resp.ok) {
-      const data = await resp.json();
-      fmtPrompt = data.template || '';
-    }
-  } catch {}
-  if (!fmtPrompt) {
-    const stored = await chrome.storage.local.get('formatPrompt');
-    fmtPrompt = stored.formatPrompt || '';
+  const text = formatSource.value.trim();
+  if (!text) {
+    setFormatStatus('No text to format.');
+    return;
   }
 
+  formatBtn.textContent = 'Stop';
+  formatBtn.classList.add('danger');
+  formatResult.value = '';
+  formatCopy.disabled = true;
+  setFormatStatus('Formatting...');
+
   try {
-    await chrome.runtime.sendMessage({
-      type: 'format:start',
+    const response = await chrome.runtime.sendMessage({
+      type: 'popup:format-start',
       tabId: currentTabId,
       text,
-      prompt: fmtPrompt,
-      host,
-      port,
+      prompt: formatPrompt.value.trim(),
     });
-  } catch {
-    formatRetryBtn.disabled = false;
-    formatRetryBtn.textContent = 'Format';
+    if (!response?.ok) {
+      setFormatStatus(response?.error || 'Format failed.');
+      resetFormatButton();
+    }
+  } catch (e) {
+    setFormatStatus(e.message || 'Format failed.');
+    resetFormatButton();
   }
+}
+
+function resetFormatButton() {
+  formatBtn.textContent = 'Format';
+  formatBtn.classList.remove('danger');
+  formatBtn.disabled = !formatSource.value.trim();
+}
+
+function setFormatStatus(msg) {
+  formatStatusBar.textContent = msg;
+  formatStatusBar.className = 'status-bar';
+  if (
+    msg && (
+      msg.includes('failed') ||
+      msg.includes('timed out') ||
+      msg.includes('error') ||
+      msg.includes('Error') ||
+      msg.includes('Stop')
+    )
+  ) {
+    formatStatusBar.className = 'status-bar error';
+  }
+  if (msg && (msg.includes('Formatted') || msg.includes('Ready'))) {
+    formatStatusBar.className = 'status-bar success';
+  }
+}
+
+function updateFormatButtons() {
+  const hasSource = formatSource.value.trim().length > 0;
+  const hasResult = formatResult.value.trim().length > 0;
+  const isActive = formatBtn.textContent === 'Stop';
+  formatBtn.disabled = isActive ? false : !hasSource;
+  formatCopy.disabled = !hasResult;
 }
 
 // ── Translation panel actions ─────────────────────────────────
@@ -649,7 +731,6 @@ function updateResultButtons() {
   const hasText = resultEl.value.trim().length > 0;
   copyBtn.disabled = !hasText;
   downloadBtn.disabled = !hasText;
-  formatRetryBtn.disabled = !hasText;
 }
 
 // ── Render ─────────────────────────────────────────────────────
@@ -678,8 +759,43 @@ function renderState(state) {
   startBtn.disabled = isActive;
   forceCheckbox.disabled = isActive;
   stopBtn.classList.toggle('hidden', !isActive);
-  if (isActive) formatRetryBtn.disabled = true;
+
+  // ── Format tab state (unified flow) ──
+  if (state.format) {
+    if (state.format.resultText && !formatUserEdited) {
+      formatResult.value = state.format.resultText;
+    } else if (state.format.resultText && formatResult.value !== state.format.resultText) {
+      // Only overwrite if user hasn't manually edited the format source
+      // and the result is genuinely new.
+      if (!formatUserEdited) {
+        formatResult.value = state.format.resultText;
+      }
+    }
+    if (state.format.status) {
+      setFormatStatus(state.format.status);
+    }
+    if (state.format.active) {
+      formatBtn.textContent = 'Stop';
+      formatBtn.classList.add('danger');
+      formatCopy.disabled = true;
+    } else if (formatBtn.textContent === 'Stop') {
+      resetFormatButton();
+      if (state.format.resultText) {
+        formatCopy.disabled = false;
+      }
+    }
+    if (state.format.prompt !== undefined) {
+      // Persisted prompt from background — restore on initial load
+      // (popup.js init() will overwrite this for known tabIds).
+    }
+  }
+
+  // ── Translate tab state (legacy tl2-* flow renders separately) ──
+  // The legacy tl2:* messages are handled in the chrome.runtime.onMessage
+  // listener above; the renderState() function only needs to update the
+  // transcript tab here.
 
   updateResultButtons();
   updateTranslationButtons();
+  updateFormatButtons();
 }

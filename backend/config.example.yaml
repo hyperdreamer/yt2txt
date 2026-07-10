@@ -20,6 +20,11 @@ ai:
   # Falls back to OPENAI_API_KEY env var if omitted.
   api_key: "$OPENAI_API_KEY"
 
+  # Text-to-text models for /format and /translate endpoints.
+  # Each defaults to `model` above when omitted.
+  format_model: "gpt-4o"
+  translate_model: "gpt-4o"
+
 # Transcription cache (SQLite). Enabled by default.
 # Cache hits skip all yt-dlp and API work — instant response.
 cache:

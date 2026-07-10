@@ -85,12 +85,34 @@ let states = new Map();
 function getState(tabId) {
   if (!states.has(tabId)) {
     states.set(tabId, {
+      // ── Global transcript state (existing) ──
       active: false,
       status: 'Idle',
       progress: 'Ready',
       transcript: '',
       error: '',
       stopRequested: false,
+
+      // ── Unified Format tab state ──
+      format: {
+        sourceText: '',
+        resultText: '',
+        prompt: '',
+        active: false,
+        status: '',
+        error: '',
+      },
+
+      // ── Unified Translate tab state ──
+      translate: {
+        sourceText: '',
+        resultText: '',
+        prompt: '',
+        targetLanguage: 'zh',
+        active: false,
+        status: '',
+        error: '',
+      },
     });
   }
   return states.get(tabId);
@@ -126,6 +148,11 @@ function broadcastState(tabId) {
 // ── Translation / Format controllers ────────────────────────────
 const translateControllers = new Map();
 const formatControllers = new Map();
+// Unified (popup:format-* / popup:translate-*) controllers, separate
+// from the legacy TextKit ones above so both flows can run in parallel
+// without interfering with each other.
+const popupFormatControllers = new Map();
+const popupTranslateControllers = new Map();
 let keepAliveIntervalId = null;
 
 function startKeepAlive() {
@@ -147,8 +174,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   if (state?.controller) {
     state.controller.abort();
   }
+  // Legacy TextKit flows
   handleTranslateStop(tabId);
   handleFormatStop(tabId);
+  // Unified YT2TXT flows
+  handlePopupFormatStop(tabId);
+  handlePopupTranslateStop(tabId);
   states.delete(tabId);
   chrome.storage.local
     .remove([
@@ -162,6 +193,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       `fmtResult:${tabId}`,
       `fmtStatus:${tabId}`,
       `fmtFormatting:${tabId}`,
+      // Unified tab persistence
+      `format:result:${tabId}`,
+      `format:status:${tabId}`,
+      `format:prompt:${tabId}`,
+      `translate:result:${tabId}`,
+      `translate:status:${tabId}`,
+      `translate:language:${tabId}`,
+      `translate:prompt:${tabId}`,
     ])
     .catch(() => {});
 });
@@ -215,6 +254,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: e.message }));
     return true;
+  }
+  // Unified Format tab (calls YT2TXT backend /format)
+  if (message?.type === 'popup:format-start') {
+    handlePopupFormatStart(message)
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
+  if (message?.type === 'popup:format-stop') {
+    handlePopupFormatStop(message.tabId);
+    sendResponse({ ok: true });
+    return false;
+  }
+  // Unified Translate tab (calls YT2TXT backend /translate)
+  if (message?.type === 'popup:translate-start') {
+    handlePopupTranslateStart(message)
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
+  if (message?.type === 'popup:translate-stop') {
+    handlePopupTranslateStop(message.tabId);
+    sendResponse({ ok: true });
+    return false;
   }
   return false;
 });
@@ -385,8 +448,12 @@ async function handleStop() {
   if (state.controller) {
     state.controller.abort();
   }
+  // Legacy TextKit flows
   handleTranslateStop(tab.id);
   handleFormatStop(tab.id);
+  // Unified YT2TXT flows
+  handlePopupFormatStop(tab.id);
+  handlePopupTranslateStop(tab.id);
 
   updateState(tab.id, {
     progress: 'Stopping...',
@@ -643,6 +710,220 @@ function handleFormatStop(tabId) {
     controller.abort();
     formatControllers.delete(tabId);
     chrome.storage.local.remove(`fmtFormatting:${tabId}`);
+  }
+}
+
+// ── Unified Format handler (YT2TXT /format) ───────────────────
+async function handlePopupFormatStart(msg) {
+  const { tabId, text, prompt } = msg;
+  if (!tabId || !text) {
+    return { ok: false, error: 'Missing tabId or text.' };
+  }
+  const state = getState(tabId);
+  if (state.format.active) {
+    return { ok: false, error: 'Format already in progress.' };
+  }
+
+  // Abort any in-flight unified format for this tab
+  handlePopupFormatStop(tabId);
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, BACKEND_TIMEOUT_MS);
+
+  try {
+    popupFormatControllers.set(tabId, controller);
+    startKeepAlive();
+
+    state.format.sourceText = text;
+    state.format.prompt = prompt || '';
+    state.format.active = true;
+    state.format.status = 'Formatting...';
+    state.format.error = '';
+    broadcastState(tabId);
+
+    const baseUrl = await getYt2txtEndpoint('/format');
+    const url = `${baseUrl}?_=${Date.now()}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, prompt: prompt || '' }),
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || payload.detail || `HTTP ${response.status}`);
+    }
+    if (payload.error) {
+      throw new Error(payload.error);
+    }
+
+    const formatted = payload.text || '';
+    state.format.resultText = formatted;
+    state.format.status = 'Formatted ✓';
+    state.format.error = '';
+    state.format.active = false;
+
+    // Persist result + status so popup reopen can restore them
+    await chrome.storage.local.set({
+      [`format:result:${tabId}`]: formatted,
+      [`format:status:${tabId}`]: 'Formatted ✓',
+    });
+    if (prompt) {
+      await chrome.storage.local.set({ [`format:prompt:${tabId}`]: prompt });
+    }
+
+    broadcastState(tabId);
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      state.format.error = timedOut
+        ? 'Formatting timed out.'
+        : 'Formatting stopped.';
+    } else {
+      state.format.error = e.message || 'Formatting failed.';
+    }
+    state.format.status = state.format.error;
+    state.format.active = false;
+    broadcastState(tabId);
+  } finally {
+    clearTimeout(timeoutId);
+    if (popupFormatControllers.get(tabId) === controller) {
+      popupFormatControllers.delete(tabId);
+    }
+    if (
+      popupFormatControllers.size === 0 &&
+      popupTranslateControllers.size === 0
+    ) {
+      stopKeepAlive();
+    }
+  }
+  return { ok: true };
+}
+
+function handlePopupFormatStop(tabId) {
+  const controller = popupFormatControllers.get(tabId);
+  if (controller) {
+    controller.abort();
+    popupFormatControllers.delete(tabId);
+  }
+  const state = states.get(tabId);
+  if (state?.format?.active) {
+    state.format.active = false;
+    state.format.status = 'Formatting stopped.';
+    broadcastState(tabId);
+  }
+}
+
+// ── Unified Translate handler (YT2TXT /translate) ──────────────
+async function handlePopupTranslateStart(msg) {
+  const { tabId, text, targetLanguage, prompt } = msg;
+  if (!tabId || !text) {
+    return { ok: false, error: 'Missing tabId or text.' };
+  }
+  const state = getState(tabId);
+  if (state.translate.active) {
+    return { ok: false, error: 'Translation already in progress.' };
+  }
+
+  // Abort any in-flight unified translate for this tab
+  handlePopupTranslateStop(tabId);
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, BACKEND_TIMEOUT_MS);
+
+  try {
+    popupTranslateControllers.set(tabId, controller);
+    startKeepAlive();
+
+    state.translate.sourceText = text;
+    state.translate.targetLanguage = targetLanguage || 'zh';
+    state.translate.prompt = prompt || '';
+    state.translate.active = true;
+    state.translate.status = `Translating to ${state.translate.targetLanguage}...`;
+    state.translate.error = '';
+    broadcastState(tabId);
+
+    const baseUrl = await getYt2txtEndpoint('/translate');
+    const url = `${baseUrl}?_=${Date.now()}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        target_language: targetLanguage || 'zh',
+        prompt: prompt || '',
+      }),
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || payload.detail || `HTTP ${response.status}`);
+    }
+    if (payload.error) {
+      throw new Error(payload.error);
+    }
+
+    const translated = payload.text || '';
+    state.translate.resultText = translated;
+    state.translate.status = 'Translation complete.';
+    state.translate.error = '';
+    state.translate.active = false;
+
+    // Persist result + status + language so popup reopen can restore them
+    await chrome.storage.local.set({
+      [`translate:result:${tabId}`]: translated,
+      [`translate:status:${tabId}`]: 'Translation complete.',
+      [`translate:language:${tabId}`]: targetLanguage || 'zh',
+    });
+    if (prompt) {
+      await chrome.storage.local.set({ [`translate:prompt:${tabId}`]: prompt });
+    }
+
+    broadcastState(tabId);
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      state.translate.error = timedOut
+        ? 'Translation timed out.'
+        : 'Translation stopped.';
+    } else {
+      state.translate.error = e.message || 'Translation failed.';
+    }
+    state.translate.status = state.translate.error;
+    state.translate.active = false;
+    broadcastState(tabId);
+  } finally {
+    clearTimeout(timeoutId);
+    if (popupTranslateControllers.get(tabId) === controller) {
+      popupTranslateControllers.delete(tabId);
+    }
+    if (
+      popupFormatControllers.size === 0 &&
+      popupTranslateControllers.size === 0
+    ) {
+      stopKeepAlive();
+    }
+  }
+  return { ok: true };
+}
+
+function handlePopupTranslateStop(tabId) {
+  const controller = popupTranslateControllers.get(tabId);
+  if (controller) {
+    controller.abort();
+    popupTranslateControllers.delete(tabId);
+  }
+  const state = states.get(tabId);
+  if (state?.translate?.active) {
+    state.translate.active = false;
+    state.translate.status = 'Translation stopped.';
+    broadcastState(tabId);
   }
 }
 
