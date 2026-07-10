@@ -777,6 +777,12 @@ async function handlePopupFormatStart(msg) {
     }
 
     broadcastState(tabId);
+
+    // Auto-copy / auto-save formatted result
+    if (formatted) {
+      try { await fmtAutoCopyIfEnabled(formatted); } catch (e) { console.error('auto-copy fmt failed:', e); }
+      try { await fmtAutoSaveIfEnabled(tabId, formatted); } catch (e) { console.error('auto-save fmt failed:', e); }
+    }
   } catch (e) {
     if (e.name === 'AbortError') {
       state.format.error = timedOut
@@ -980,6 +986,48 @@ async function autoSaveIfEnabled(text) {
   } catch (e) {
     console.error('Auto-save failed:', e);
     chrome.notifications.create('yt2txt-auto-save-failed', {
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title: 'YT2TXT — Save failed',
+      message: e.message,
+      priority: 1,
+    });
+  }
+}
+
+// ── Auto-copy / auto-save helpers (format) ──────────────────
+async function fmtAutoCopyIfEnabled(text) {
+  const { fmtAutoCopy } = await chrome.storage.sync.get({ fmtAutoCopy: false });
+  if (!fmtAutoCopy || !text) return;
+  copyToClipboard(text);
+  chrome.notifications.create('yt2txt-fmt-auto-copy', {
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title: 'YT2TXT — Copied',
+    message: 'Formatted text copied to system clipboard.',
+    priority: 0,
+  });
+}
+
+async function fmtAutoSaveIfEnabled(tabId, text) {
+  const { fmtAutoSave, fmtAutoSavePath } = await chrome.storage.sync.get({
+    fmtAutoSave: false,
+    fmtAutoSavePath: '',
+  });
+  if (!fmtAutoSave || !fmtAutoSavePath || !text) return;
+  try {
+    const result = await handleSaveTranslation({ text, path: fmtAutoSavePath });
+    if (!result.ok) throw new Error(result.error || 'Save failed');
+    chrome.notifications.create('yt2txt-fmt-auto-save', {
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title: 'YT2TXT — Saved',
+      message: `Formatted text saved to ${result.path || fmtAutoSavePath}.`,
+      priority: 0,
+    });
+  } catch (e) {
+    console.error('Auto-save format failed:', e);
+    chrome.notifications.create('yt2txt-fmt-auto-save-failed', {
       type: 'basic',
       iconUrl: 'icons/icon128.png',
       title: 'YT2TXT — Save failed',

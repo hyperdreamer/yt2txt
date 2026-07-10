@@ -20,6 +20,12 @@ const formatBtn = document.getElementById('format-btn');
 const formatStatusBar = document.getElementById('format-status-bar');
 const formatResult = document.getElementById('format-result');
 const formatCopy = document.getElementById('format-copy');
+const formatSave = document.getElementById('format-save');
+const fmtAutocopyCheckbox = document.getElementById('fmt-autocopy');
+const fmtAutosaveCheckbox = document.getElementById('fmt-autosave');
+const fmtAutoformatCheckbox = document.getElementById('fmt-autoformat');
+const fmtAutosavePath = document.getElementById('fmt-autosave-path');
+const fmtPathSuggestions = document.getElementById('fmt-path-suggestions');
 const hostInput = document.getElementById('host');
 const portInput = document.getElementById('port');
 const langSelect = document.getElementById('lang');
@@ -103,6 +109,14 @@ formatPrompt.addEventListener('input', () => {
   if (currentTabId) {
     chrome.storage.local.set({ [`format:prompt:${currentTabId}`]: formatPrompt.value });
   }
+});
+formatSave.addEventListener('click', saveFormatResult);
+fmtAutocopyCheckbox.addEventListener('change', saveFmtSettings);
+fmtAutosaveCheckbox.addEventListener('change', saveFmtSettings);
+fmtAutoformatCheckbox.addEventListener('change', saveFmtSettings);
+fmtAutosavePath.addEventListener('input', () => {
+  saveFmtSettings();
+  updateFmtPathSuggestions(fmtAutosavePath.value);
 });
 hostInput.addEventListener('change', saveYt2txtSettings);
 portInput.addEventListener('change', saveYt2txtSettings);
@@ -221,6 +235,18 @@ async function init() {
   tl2AutosaveCheckbox.checked = items.tl2AutoSave;
   tl2AutosavePath.value = items.tl2AutoSavePath;
   tl2AutotranslateCheckbox.checked = items.yt2txtAutoTranslate;
+
+  // Format tab settings
+  const fmtItems = await chrome.storage.sync.get({
+    fmtAutoCopy: false,
+    fmtAutoSave: false,
+    fmtAutoFormat: false,
+    fmtAutoSavePath: '',
+  });
+  fmtAutocopyCheckbox.checked = fmtItems.fmtAutoCopy;
+  fmtAutosaveCheckbox.checked = fmtItems.fmtAutoSave;
+  fmtAutoformatCheckbox.checked = fmtItems.fmtAutoFormat;
+  fmtAutosavePath.value = fmtItems.fmtAutoSavePath;
 
   // Pre-fill URL from current tab
   if (tab?.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('about:')) {
@@ -348,14 +374,68 @@ function saveTl2Settings() {
   });
 }
 
+function saveTranslatePrompt() {
+  const lang = tl2Language.value;
+  chrome.storage.local.set({ [`translatePrompt:${lang}`]: translatePrompt.value });
+}
+
 function saveTl2Language() {
   if (!currentTabId) return;
   chrome.storage.local.set({ [`tl2Language:${currentTabId}`]: tl2Language.value });
 }
 
-function saveTranslatePrompt() {
-  const lang = tl2Language.value;
-  chrome.storage.local.set({ [`translatePrompt:${lang}`]: translatePrompt.value });
+// ── Format tab settings ──────────────────────────────────────
+function saveFmtSettings() {
+  chrome.storage.sync.set({
+    fmtAutoCopy: fmtAutocopyCheckbox.checked,
+    fmtAutoSave: fmtAutosaveCheckbox.checked,
+    fmtAutoFormat: fmtAutoformatCheckbox.checked,
+    fmtAutoSavePath: fmtAutosavePath.value.trim(),
+  });
+}
+
+async function saveFormatResult() {
+  const text = formatResult.value.trim();
+  const path = fmtAutosavePath.value.trim();
+  if (!text || !path) {
+    setFormatStatus('Enter a save path first.');
+    return;
+  }
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'save:translation', text, path });
+    if (r?.ok) {
+      formatSave.textContent = 'Saved!';
+      setTimeout(() => (formatSave.textContent = 'Save'), 1500);
+      setFormatStatus(`Saved to ${r.path || path}`);
+    } else {
+      setFormatStatus(r?.error || 'Save failed.');
+    }
+  } catch (e) {
+    setFormatStatus(e.message || 'Save failed.');
+  }
+}
+
+async function fetchFmtPathSuggestions(prefix) {
+  try {
+    const host = textkitHostInput.value.trim() || 'localhost';
+    const port = parseInt(textkitPortInput.value, 10) || 8765;
+    const resp = await _popupFetch(`http://${host}:${port}/paths?prefix=${encodeURIComponent(prefix)}`);
+    const data = await resp.json().catch(() => ({}));
+    const paths = data.paths || [];
+    const tildePrefix = prefix.startsWith('~/') ? '~/' : (prefix === '~' ? '~/' : '');
+    fmtPathSuggestions.replaceChildren(...paths.map((path) => {
+      const option = document.createElement('option');
+      option.value = tildePrefix + path;
+      return option;
+    }));
+  } catch {}
+}
+
+let _fmtPathDebounceTimer = null;
+function updateFmtPathSuggestions(current) {
+  if (!current) return;
+  clearTimeout(_fmtPathDebounceTimer);
+  _fmtPathDebounceTimer = setTimeout(() => fetchFmtPathSuggestions(current), 300);
 }
 
 // ── Lightweight TextKit fetches (popup → backend) ─────────────────
@@ -547,6 +627,7 @@ async function doFormat() {
   formatBtn.classList.add('danger');
   formatResult.value = '';
   formatCopy.disabled = true;
+  formatSave.disabled = true;
   setFormatStatus('Formatting...');
 
   try {
@@ -597,6 +678,7 @@ function updateFormatButtons() {
   const isActive = formatBtn.textContent === 'Stop';
   formatBtn.disabled = isActive ? false : !hasSource;
   formatCopy.disabled = !hasResult;
+  formatSave.disabled = !hasResult;
 }
 
 // ── Translation panel actions ─────────────────────────────────
@@ -755,10 +837,12 @@ function renderState(state) {
       formatBtn.textContent = 'Stop';
       formatBtn.classList.add('danger');
       formatCopy.disabled = true;
+      formatSave.disabled = true;
     } else if (formatBtn.textContent === 'Stop') {
       resetFormatButton();
       if (state.format.resultText) {
         formatCopy.disabled = false;
+        formatSave.disabled = false;
       }
     }
   }

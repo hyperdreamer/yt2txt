@@ -333,7 +333,7 @@
 <body>
   <div class="header">
     <h1>YT2TXT</h1>
-    <span class="version">v0.0.29</span>
+    <span class="version">v0.0.30</span>
   </div>
 
   <div class="tab-bar">
@@ -410,8 +410,19 @@
     <div id="format-status-bar" class="status-bar">Ready</div>
     <label class="panel-label" for="format-result">Formatted Result</label>
     <textarea id="format-result" readonly placeholder="Formatted text will appear here..."></textarea>
+    <div class="option-row">
+      <label><input id="fmt-autocopy" type="checkbox"> Auto-copy</label>
+      <label><input id="fmt-autosave" type="checkbox"> Auto-save</label>
+      <label><input id="fmt-autoformat" type="checkbox"> Auto-format</label>
+    </div>
+    <div class="save-path-label">
+      <span>Save path</span>
+      <input id="fmt-autosave-path" type="text" placeholder="e.g. transcripts/formatted.txt" list="fmt-path-suggestions">
+      <datalist id="fmt-path-suggestions"></datalist>
+    </div>
     <div class="result-actions">
       <button id="format-copy" class="secondary" disabled>Copy</button>
+      <button id="format-save" class="secondary" disabled>Save</button>
     </div>
   </div>
 
