@@ -359,7 +359,7 @@ async function handleStart(msg) {
 
   // Fire auto-actions after a successful transcript extraction.
   if (resultText) {
-    try { await autoTranslate(tab.id, resultText); } catch (e) { console.error('autoTranslate failed:', e); }
+    try { await autoTranslate(tab.id, resultText, msg.url); } catch (e) { console.error('autoTranslate failed:', e); }
     try { await autoFormatIfEnabled(tab.id, resultText); } catch (e) { console.error('autoFormatIfEnabled failed:', e); }
   }
 
@@ -423,9 +423,11 @@ async function handleTranslateStart(msg) {
       // "Original" with no custom prompt → pass through unchanged
       if (language === 'original' && !stored[key]) {
         const translated = text;
-        await chrome.storage.local.set({ [`tl2Result:${tabId}`]: translated });
+        await chrome.storage.local.set({
+          [`tl2Result:${tabId}`]: { text: translated, sourceUrl: msg.sourceUrl || '', language },
+        });
         chrome.runtime
-          .sendMessage({ type: 'translation:update', tabId, text: translated })
+          .sendMessage({ type: 'translation:update', tabId, text: translated, sourceUrl: msg.sourceUrl })
           .catch(() => {});
         if (translated) autoCopyIfEnabled(translated);
         if (translated) autoSaveIfEnabled(translated);
@@ -446,9 +448,11 @@ async function handleTranslateStart(msg) {
       if (payload.error) throw new Error(payload.error);
 
       const translated = payload.text || '';
-      await chrome.storage.local.set({ [`tl2Result:${tabId}`]: translated });
+      await chrome.storage.local.set({
+        [`tl2Result:${tabId}`]: { text: translated, sourceUrl: msg.sourceUrl || '', language },
+      });
       chrome.runtime
-        .sendMessage({ type: 'translation:update', tabId, text: translated })
+        .sendMessage({ type: 'translation:update', tabId, text: translated, sourceUrl: msg.sourceUrl })
         .catch(() => {});
       // Auto-copy / auto-save translated text
       if (translated) autoCopyIfEnabled(translated);
@@ -689,7 +693,7 @@ async function autoFormatIfEnabled(tabId, text, host, port) {
 }
 
 // ── Auto-translate helper (called from handleStart) ────────────
-async function autoTranslate(tabId, text) {
+async function autoTranslate(tabId, text, sourceUrl) {
   const { yt2txtAutoTranslate } = await chrome.storage.sync.get({
     yt2txtAutoTranslate: false,
   });
@@ -716,6 +720,7 @@ async function autoTranslate(tabId, text) {
     tabId,
     text,
     language,
+    sourceUrl,
     host: backend.textkitHost,
     port: backend.textkitPort,
   }).catch((e) => console.error('autoTranslate failed:', e));

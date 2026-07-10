@@ -108,7 +108,11 @@ chrome.runtime.onMessage.addListener((message) => {
     if (message.tabId !== currentTabId) return;
     if (message.text) {
       tl2Result.value = message.text;
-      chrome.storage.local.set({ [`tl2Result:${currentTabId}`]: message.text });
+      // Store with sourceUrl so init() validates on reopen
+      const lang = tl2Language.value;
+      chrome.storage.local.set({
+        [`tl2Result:${currentTabId}`]: { text: message.text, sourceUrl: message.sourceUrl || urlInput.value, language: lang },
+      });
     } else if (message.error) {
       // Error path: keep any existing result visible
     }
@@ -205,7 +209,17 @@ async function init() {
       tl2Language.value = tl2Stored[`tl2Language:${currentTabId}`];
     }
     if (tl2Stored[`tl2Result:${currentTabId}`]) {
-      tl2Result.value = tl2Stored[`tl2Result:${currentTabId}`];
+      const entry = tl2Stored[`tl2Result:${currentTabId}`];
+      if (typeof entry === 'object' && entry.text) {
+        if (entry.sourceUrl === tab?.url) {
+          tl2Result.value = entry.text;
+          if (entry.language) tl2Language.value = entry.language;
+        }
+        // sourceUrl mismatch → leave empty
+      } else if (typeof entry === 'string') {
+        // Legacy format
+        tl2Result.value = entry;
+      }
     }
     if (tl2Stored[`tl2Status:${currentTabId}`]) {
       setTl2Progress(tl2Stored[`tl2Status:${currentTabId}`]);
@@ -450,6 +464,7 @@ async function doTranslation() {
       tabId: currentTabId,
       text,
       language,
+      sourceUrl: urlInput.value,
       host,
       port,
     });
