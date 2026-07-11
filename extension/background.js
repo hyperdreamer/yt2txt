@@ -654,6 +654,7 @@ async function handleFormatStart(msg) {
     await chrome.storage.local.set({
       [`fmtFormatting:${tabId}`]: true,
       [`fmtStatus:${tabId}`]: 'Formatting...',
+      [`format:status:${tabId}`]: 'Formatting...',
     });
     await chrome.storage.local.remove(`fmtResult:${tabId}`);
     chrome.runtime
@@ -674,17 +675,10 @@ async function handleFormatStart(msg) {
       if (payload.error) throw new Error(payload.error);
 
       const formatted = payload.text || '';
-      await chrome.storage.local.set({ [`fmtResult:${tabId}`]: formatted });
-      // Replace the transcript with formatted text, preserving the URL from
-      // the original transcript entry so popup init() can still validate it.
-      const existingEntry = await chrome.storage.local.get(`transcript:${tabId}`);
-      const originalUrl =
-        existingEntry[`transcript:${tabId}`] &&
-        typeof existingEntry[`transcript:${tabId}`] === 'object'
-          ? existingEntry[`transcript:${tabId}`].url || ''
-          : '';
       await chrome.storage.local.set({
-        [`transcript:${tabId}`]: { text: formatted, url: originalUrl },
+        [`fmtResult:${tabId}`]: formatted,
+        [`format:result:${tabId}`]: formatted,
+        [`format:status:${tabId}`]: 'Formatted ✓',
       });
       chrome.runtime
         .sendMessage({ type: 'format:update', tabId, text: formatted })
@@ -692,7 +686,10 @@ async function handleFormatStart(msg) {
     } catch (e) {
       if (e.name === 'AbortError') {
         const message = timedOut ? 'Formatting timed out.' : 'Formatting stopped.';
-        await chrome.storage.local.set({ [`fmtStatus:${tabId}`]: message });
+        await chrome.storage.local.set({
+          [`fmtStatus:${tabId}`]: message,
+          [`format:status:${tabId}`]: message,
+        });
         if (timedOut) {
           chrome.runtime
             .sendMessage({ type: 'format:update', tabId, text: '', error: message })
@@ -701,7 +698,10 @@ async function handleFormatStart(msg) {
         return { ok: !timedOut, error: timedOut ? message : undefined };
       }
       const errorMessage = e.message || 'Formatting failed.';
-      await chrome.storage.local.set({ [`fmtStatus:${tabId}`]: errorMessage });
+      await chrome.storage.local.set({
+        [`fmtStatus:${tabId}`]: errorMessage,
+        [`format:status:${tabId}`]: errorMessage,
+      });
       chrome.runtime
         .sendMessage({ type: 'format:update', tabId, text: '', error: errorMessage })
         .catch(() => {});

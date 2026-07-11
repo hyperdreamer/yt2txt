@@ -195,14 +195,11 @@ chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'format:update') {
     if (message.tabId !== currentTabId) return;
     if (message.text) {
-      userEditedResult = false;
-      resultEl.value = message.text;
+      formatResult.value = message.text;
+      formatCopy.disabled = false;
+      formatSave.disabled = !!formatResult.value.trim();
       formatRetryRow.classList.add('hidden');
-      updateResultButtons();
-      updateTranslationButtons();
-      updateFormatButtons();
-      statusBar.textContent = 'Transcript formatted ✓';
-      statusBar.className = 'status-bar success';
+      setFormatStatus('Formatted ✓');
     } else if (message.error) {
       formatRetryRow.classList.remove('hidden');
       formatRetryStatus.textContent = message.error;
