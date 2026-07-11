@@ -4,20 +4,17 @@ A Chrome Manifest V3 extension + FastAPI backend that extracts transcripts from 
 
 **Two paths:**
 1. **Native subtitles available** → downloaded directly via yt-dlp (fast, free).
-2. **No subtitles** → audio is downloaded and transcribed via OpenAI-compatible API (`gpt-4o-transcribe` or `gpt-4o-min-transcribe`).
+2. **No subtitles** → audio is downloaded and transcribed via OpenAI's `gpt-4o-transcribe` or `gpt-4o-min-transcribe`.
 
-**Three-tab UI:**
-- **Transcript tab** — extract transcripts from video URLs
-- **Format tab** — format transcripts for readability via TextKit
-- **Translation tab** — translate transcripts with auto-copy/auto-save (prompts managed in TextKit)
+**Transcript cache:** results are cached in SQLite with a configurable TTL (default 30 days). Cache hits skip all yt-dlp and API work for instant responses.
 
 ## Prerequisites
 
 - Python 3.10+
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`pip install yt-dlp`)
+- [ffmpeg](https://ffmpeg.org/) (for audio splitting on long videos)
 - Chrome or Chromium browser
-- OpenAI-compatible API key (for transcription and formatting; free if video has subtitles)
-- [TextKit](https://github.com/hyperdreamer/textkit) backend (for translation and formatting)
+- OpenAI API key (for transcription; free if video has subtitles)
 
 ## Setup
 
@@ -30,16 +27,22 @@ pip install -r requirements.txt
 
 ### 2. Configuration
 
-```bash
-cp config.example.yaml config.yaml
-```
-
-Edit `config.yaml` and set your API key:
+Edit `config.yaml` (copy from `config.example.yaml` if needed):
 
 ```yaml
+host: "127.0.0.1"
+port: 8666
+
 ai:
-  api_key: "$OPENAI_API_KEY"   # or set the OPENAI_API_KEY env var
-  model: "gpt-4o-transcribe"   # or gpt-4o-min-transcribe
+  model: "gpt-4o-transcribe"     # or gpt-4o-min-transcribe
+  api_base: "https://api.openai.com"
+  api_key: "$OPENAI_API_KEY"     # or set the OPENAI_API_KEY env var
+
+cache:
+  enabled: true                  # SQLite transcript cache
+  ttl_days: 30
+
+# debug: true                    # Enable debug logging
 ```
 
 Or export the environment variable:
@@ -65,34 +68,23 @@ The server starts on `http://127.0.0.1:8666` by default.
 
 ## Usage
 
-### Transcript tab
+### Three-tab interface
 
-1. Navigate to a video page (YouTube, Vimeo, etc.)
-2. Click **Get Transcript**
-3. Watch the status bar — it will show progress (checking subtitles → downloading audio → transcribing)
-4. Copy or download the result
-
-### Format tab
-
-1. Format runs automatically after transcript extraction (no toggle needed)
-2. Or switch to the **Format** tab and click **Format** to re-run on current text
-3. Copy or save the formatted result
-
-### Translation tab
-
-1. Select a target language
-2. Click **Translate** — or enable **Auto-translate** to translate automatically after formatting
-3. Enable **Auto-copy** / **Auto-save** for hands-off workflow
-4. When the transcript language matches the target, no API call is made — text passes through directly
-5. Translation and formatting prompts are managed in the **TextKit** backend (Prompt tab / `PUT /prompts/{name}`)
+- **Transcript** — paste a URL and click **Get Transcript**. Shows progress (checking subtitles → downloading audio → transcribing). Copy or download the result.
+- **Format** — sends the transcript to TextKit's `/format` endpoint for cleanup/structuring. Supports auto-copy and auto-save with path autocomplete.
+- **Translation** — sends the transcript to TextKit's `/translate` endpoint. Supports auto-copy, auto-save, and auto-translate (chain: transcript → format → translate).
 
 ### Keyboard shortcut
 
 Press **Ctrl+Shift+T** (Mac: **Cmd+Shift+T**) on any video page to start transcript extraction immediately.
 
-### Manual URL
+### Force refresh
 
-You can paste any video URL into the popup's URL field — it doesn't have to be the current tab.
+Check "Force refresh" to bypass the transcript cache and re-fetch from source.
+
+### Backend settings
+
+Click the ⚙ gear icon to configure YT2TXT and TextKit backend host/port.
 
 ## Backend endpoints
 
@@ -103,8 +95,8 @@ Returns `{"status": "ok"}`.
 ```json
 {
   "url": "https://www.youtube.com/watch?v=...",
-  "model": "gpt-4o-transcribe",      // optional, defaults to config
-  "force": false                     // optional, bypass cache
+  "model": "gpt-4o-transcribe",   // optional, defaults to config
+  "force": false                   // optional, bypass cache
 }
 ```
 
@@ -112,8 +104,8 @@ Response:
 ```json
 {
   "text": "...transcript...",
-  "source": "subtitles",       // or "transcription"
-  "model": "yt-dlp",           // or "gpt-4o-transcribe"
+  "source": "subtitles",           // or "transcription" or "cached"
+  "model": "yt-dlp",               // or "gpt-4o-transcribe" or "cached"
   "error": null
 }
 ```
@@ -122,17 +114,18 @@ Response:
 
 ```
 extension/          ← Chrome MV3 extension
-  manifest.json
-  background.js     ← service worker (all API calls, translation, formatting)
-  popup.html        ← popup UI (Transcript + Format + Translation tabs)
-  popup.js          ← popup logic, delegates to background via messages
-  icons/             ← icon16.png, icon48.png, icon128.png
+  manifest.json     ← permissions, commands, icons
+  background.js     ← service worker (all API calls, per-tab state)
+  popup.html        ← three-tab popup UI
+  popup.js          ← tab switching, settings, autocomplete
+  icons/            ← icon16.png, icon48.png, icon128.png
 
 backend/            ← FastAPI backend
-  main.py           ← FastAPI app with /transcript and /health
+  main.py           ← /transcript and /health endpoints (949 lines)
   config.yaml       ← live config (gitignored)
   config.example.yaml ← committed example
-  requirements.txt
+  requirements.txt  ← Python dependencies
+  transcript_cache.db ← SQLite cache (auto-created)
 ```
 
-The extension never calls `fetch()` from the popup for transcript/translation/format — all long-running API requests go through the background service worker, which survives popup closes.
+The extension never calls `fetch()` for long-running operations from the popup — all transcription, formatting, and translation requests go through the background service worker, which survives popup closes. Lightweight path-autocomplete fetches are an exception and call `fetch()` directly from the popup with short timeouts.
