@@ -108,23 +108,28 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.41")
+app = FastAPI(title="YT2TXT", version="0.0.42")
 
 
 # ── Config (cached) ────────────────────────────────────────────────
 
 _config_cache: AppConfig | None = None
 _config_cache_ts: float = 0.0
+_config_lock = asyncio.Lock()
 
 
-def get_config() -> AppConfig:
+async def get_config() -> AppConfig:
     """Return the current AppConfig, re-reading config.yaml at most every 60 s."""
     global _config_cache, _config_cache_ts
     now = time.monotonic()
     if _config_cache is not None and (now - _config_cache_ts) < 60:
         return _config_cache
-    _config_cache = load_config()
-    _config_cache_ts = now
+    async with _config_lock:
+        # Re-check — another coroutine may have refreshed while we waited.
+        if _config_cache is not None and (now - _config_cache_ts) < 60:
+            return _config_cache
+        _config_cache = load_config()
+        _config_cache_ts = time.monotonic()
     return _config_cache
 
 
@@ -161,7 +166,7 @@ async def _log_requests(request: Request, call_next: Any) -> Response:
 
 def _debug(tag: str, msg: str) -> None:
     """Print a timestamped debug message when debug mode is enabled."""
-    config = get_config()
+    config = load_config()
     if not config.debug:
         return
     from datetime import datetime, timezone
@@ -759,7 +764,7 @@ def health() -> Response:
 
 @app.post("/transcript")
 async def transcript(req: TranscriptRequest) -> dict[str, Any]:
-    config = get_config()
+    config = await get_config()
 
     # ── Validate input ──────────────────────────────────────
     if not req.url or not isinstance(req.url, str) or not req.url.strip():

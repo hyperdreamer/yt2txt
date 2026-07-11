@@ -273,6 +273,17 @@ async function init() {
     }
   }
 
+  // Restore auto-format result (may have completed while popup was closed)
+  const fmtResultKey = currentTabId ? `fmtResult:${currentTabId}` : null;
+  if (fmtResultKey && !formatResult.value.trim()) {
+    const fmtStored = await chrome.storage.local.get(fmtResultKey);
+    if (fmtStored[fmtResultKey]) {
+      formatResult.value = fmtStored[fmtResultKey];
+      formatCopy.disabled = false;
+      formatSave.disabled = false;
+    }
+  }
+
   // Load translation tab language preference (per-tab)
   if (currentTabId) {
     const tl2Lang = await chrome.storage.local.get(`tl2Language:${currentTabId}`);

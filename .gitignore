@@ -46,6 +46,9 @@ Thumbs.db
 *.swp
 *.swo
 
+# Database
+backend/transcript_cache.db
+
 # Temp audio downloads
 backend/tmp/
 *.mp3

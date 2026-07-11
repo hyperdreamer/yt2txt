@@ -8,11 +8,7 @@ const LOCAL_BACKEND_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 // Map transcript language codes to translation target names.
 // When source == target, no API call is needed — just pass through.
-const LANG_CODE_TO_NAME = {
-  en: 'English', zh: 'Chinese', ja: 'Japanese', ko: 'Korean',
-  es: 'Spanish', fr: 'French', de: 'German', ru: 'Russian',
-  ar: 'Arabic', pt: 'Portuguese', hi: 'Hindi',
-};
+const LANG_CODES = new Set(['en', 'zh', 'ja', 'ko', 'es', 'fr', 'de', 'ru', 'ar', 'pt', 'hi']);
 
 // ── Backend URL cache (yt2txt) ──────────────────────────────────
 let _yt2txtBaseUrl = null;
@@ -150,7 +146,6 @@ const formatControllers = new Map();
 // from the legacy TextKit ones above so both flows can run in parallel
 // without interfering with each other.
 const popupFormatControllers = new Map();
-const popupTranslateControllers = new Map();
 let keepAliveIntervalId = null;
 
 function startKeepAlive() {
@@ -177,7 +172,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   handleFormatStop(tabId);
   // Unified YT2TXT flows
   handlePopupFormatStop(tabId);
-  handlePopupTranslateStop(tabId);
   states.delete(tabId);
   chrome.storage.local
     .remove([
@@ -261,17 +255,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   // Unified Translate tab (calls YT2TXT backend /translate)
-  if (message?.type === 'popup:translate-start') {
-    handlePopupTranslateStart(message)
-      .then((r) => sendResponse(r))
-      .catch((e) => sendResponse({ ok: false, error: e.message }));
-    return true;
-  }
-  if (message?.type === 'popup:translate-stop') {
-    handlePopupTranslateStop(message.tabId);
-    sendResponse({ ok: true });
-    return false;
-  }
+
   return false;
 });
 
@@ -447,7 +431,6 @@ async function handleStop() {
   handleFormatStop(tab.id);
   // Unified YT2TXT flows
   handlePopupFormatStop(tab.id);
-  handlePopupTranslateStop(tab.id);
 
   updateState(tab.id, {
     progress: 'Stopping...',
@@ -487,18 +470,6 @@ async function handleTranslateStart(msg) {
     try {
       // "Original" → pass through unchanged (no API call).
       if (language === 'original') {
-        chrome.runtime
-          .sendMessage({ type: 'translation:update', tabId, text, sourceUrl: msg.sourceUrl })
-          .catch(() => {});
-        if (text) autoCopyIfEnabled(text);
-        if (text) autoSaveIfEnabled(text);
-        return { ok: true };
-      }
-
-      // If the transcript language matches the translation target,
-      // no API call is needed — just pass through and auto-save/copy.
-      const sourceName = LANG_CODE_TO_NAME[msg.sourceLang];
-      if (sourceName && sourceName.toLowerCase() === language.toLowerCase()) {
         chrome.runtime
           .sendMessage({ type: 'translation:update', tabId, text, sourceUrl: msg.sourceUrl })
           .catch(() => {});
@@ -756,8 +727,7 @@ async function handlePopupFormatStart(msg) {
       popupFormatControllers.delete(tabId);
     }
     if (
-      popupFormatControllers.size === 0 &&
-      popupTranslateControllers.size === 0
+      popupFormatControllers.size === 0
     ) {
       stopKeepAlive();
     }
@@ -779,108 +749,7 @@ function handlePopupFormatStop(tabId) {
   }
 }
 
-// ── Unified Translate handler (TextKit /translate) ──────────────
-async function handlePopupTranslateStart(msg) {
-  const { tabId, text, targetLanguage } = msg;
-  if (!tabId || !text) {
-    return { ok: false, error: 'Missing tabId or text.' };
-  }
-  const state = getState(tabId);
-  if (state.translate.active) {
-    return { ok: false, error: 'Translation already in progress.' };
-  }
 
-  // Abort any in-flight unified translate for this tab
-  handlePopupTranslateStop(tabId);
-
-  const controller = new AbortController();
-  let timedOut = false;
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, BACKEND_TIMEOUT_MS);
-
-  try {
-    popupTranslateControllers.set(tabId, controller);
-    startKeepAlive();
-
-    state.translate.sourceText = text;
-    state.translate.targetLanguage = targetLanguage || 'zh';
-    state.translate.active = true;
-    state.translate.status = `Translating to ${state.translate.targetLanguage}...`;
-    state.translate.error = '';
-    broadcastState(tabId);
-
-    const baseUrl = await getTextkitEndpoint('/translate');
-    const url = `${baseUrl}?_=${Date.now()}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text,
-        language: targetLanguage || 'zh',
-      }),
-      signal: controller.signal,
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(payload.error || payload.detail || `HTTP ${response.status}`);
-    }
-    if (payload.error) {
-      throw new Error(payload.error);
-    }
-
-    const translated = payload.text || '';
-    state.translate.resultText = translated;
-    state.translate.status = 'Translation complete.';
-    state.translate.error = '';
-    state.translate.active = false;
-
-    // Persist language preference only
-    await chrome.storage.local.set({
-      [`translate:language:${tabId}`]: targetLanguage || 'zh',
-    });
-
-    broadcastState(tabId);
-  } catch (e) {
-    if (e.name === 'AbortError') {
-      state.translate.error = timedOut
-        ? 'Translation timed out.'
-        : 'Translation stopped.';
-    } else {
-      state.translate.error = e.message || 'Translation failed.';
-    }
-    state.translate.status = state.translate.error;
-    state.translate.active = false;
-    broadcastState(tabId);
-  } finally {
-    clearTimeout(timeoutId);
-    if (popupTranslateControllers.get(tabId) === controller) {
-      popupTranslateControllers.delete(tabId);
-    }
-    if (
-      popupFormatControllers.size === 0 &&
-      popupTranslateControllers.size === 0
-    ) {
-      stopKeepAlive();
-    }
-  }
-  return { ok: true };
-}
-
-function handlePopupTranslateStop(tabId) {
-  const controller = popupTranslateControllers.get(tabId);
-  if (controller) {
-    controller.abort();
-    popupTranslateControllers.delete(tabId);
-  }
-  const state = states.get(tabId);
-  if (state?.translate?.active) {
-    state.translate.active = false;
-    state.translate.status = 'Translation stopped.';
-    broadcastState(tabId);
-  }
-}
 
 // ── Clipboard ──────────────────────────────────────────────────
 async function copyToClipboard(text) {
