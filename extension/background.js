@@ -422,11 +422,12 @@ async function handleStart(msg) {
   }
 
   // Fire auto-actions after a successful transcript extraction.
+  // Chain: Transcript → Format → Translate (sequential).
+  // autoFormatIfEnabled fires first; format completion triggers autoTranslate.
   if (resultText) {
     // Cache original transcript before formatting (for retry on format failure)
     await chrome.storage.local.set({ [`transcript_raw:${tab.id}`]: resultText });
-    try { await autoTranslate(tab.id, resultText, msg.url); } catch (e) { console.error('autoTranslate failed:', e); }
-    try { await autoFormatIfEnabled(tab.id, resultText); } catch (e) { console.error('autoFormatIfEnabled failed:', e); }
+    try { await autoFormatIfEnabled(tab.id, resultText, msg.url); } catch (e) { console.error('autoFormatIfEnabled failed:', e); }
   }
 
   return { ok: true };
@@ -491,7 +492,6 @@ async function handleTranslateStart(msg) {
           .catch(() => {});
         if (text) autoCopyIfEnabled(text);
         if (text) autoSaveIfEnabled(text);
-        if (text) autoFormatIfEnabled(tabId, text, host, port);
         return { ok: true };
       }
 
@@ -504,7 +504,6 @@ async function handleTranslateStart(msg) {
           .catch(() => {});
         if (text) autoCopyIfEnabled(text);
         if (text) autoSaveIfEnabled(text);
-        if (text) autoFormatIfEnabled(tabId, text, host, port);
         return { ok: true };
       }
 
@@ -527,8 +526,6 @@ async function handleTranslateStart(msg) {
       // Auto-copy / auto-save translated text
       if (translated) autoCopyIfEnabled(translated);
       if (translated) autoSaveIfEnabled(translated);
-      // Auto-format: trigger from background so it survives popup close
-      if (translated) autoFormatIfEnabled(tabId, translated, host, port);
     } catch (e) {
       if (e.name === 'AbortError') {
         const message = timedOut ? 'Translation timed out.' : 'Translation stopped.';
@@ -632,6 +629,11 @@ async function handleFormatStart(msg) {
       chrome.runtime
         .sendMessage({ type: 'format:update', tabId, text: formatted })
         .catch(() => {});
+
+      // Auto-translate: format completion triggers translation (if enabled).
+      if (formatted) {
+        try { await autoTranslate(tabId, formatted, msg.sourceUrl); } catch (e) { console.error('autoTranslate from format failed:', e); }
+      }
     } catch (e) {
       if (e.name === 'AbortError') {
         const message = timedOut ? 'Formatting timed out.' : 'Formatting stopped.';
@@ -734,6 +736,8 @@ async function handlePopupFormatStart(msg) {
     if (formatted) {
       try { await fmtAutoCopyIfEnabled(formatted); } catch (e) { console.error('auto-copy fmt failed:', e); }
       try { await fmtAutoSaveIfEnabled(tabId, formatted); } catch (e) { console.error('auto-save fmt failed:', e); }
+      // Auto-translate: manual/auto format completion triggers translation (if enabled).
+      try { await autoTranslate(tabId, formatted); } catch (e) { console.error('autoTranslate from popup-format failed:', e); }
     }
   } catch (e) {
     if (e.name === 'AbortError') {
@@ -993,7 +997,7 @@ async function _fetchWithShortTimeout(url) {
   }
 }
 
-async function autoFormatIfEnabled(tabId, text, host, port) {
+async function autoFormatIfEnabled(tabId, text, sourceUrl, host, port) {
   // Fall back to sync storage if caller didn't provide host/port
   if (!host || port === undefined) {
     const backend = await chrome.storage.sync.get({
@@ -1008,6 +1012,7 @@ async function autoFormatIfEnabled(tabId, text, host, port) {
     text,
     host,
     port,
+    sourceUrl,
   }).catch((e) => console.error('autoFormatIfEnabled failed:', e));
 }
 
@@ -1029,7 +1034,7 @@ async function handleFormatRetry(msg) {
   });
 }
 
-// ── Auto-translate helper (called from handleStart) ────────────
+// ── Auto-translate helper (called from format completion) ─────
 async function autoTranslate(tabId, text, sourceUrl) {
   const { yt2txtAutoTranslate } = await chrome.storage.sync.get({
     yt2txtAutoTranslate: false,
