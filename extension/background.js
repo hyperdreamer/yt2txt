@@ -249,6 +249,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true });
     return false;
   }
+  if (message?.type === 'format:retry') {
+    handleFormatRetry(message)
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
   if (message?.type === 'save:translation') {
     handleSaveTranslation(message)
       .then((r) => sendResponse(r))
@@ -1084,6 +1090,43 @@ async function autoFormatIfEnabled(tabId, text, host, port) {
     host,
     port,
   }).catch((e) => console.error('autoFormatIfEnabled failed:', e));
+}
+
+// ── Format retry helper (called from popup retry button) ───────
+async function handleFormatRetry(msg) {
+  const { tabId, text } = msg;
+  if (!tabId || !text) return { ok: false, error: 'Missing tabId or text.' };
+
+  // Resolve format prompt (same chain as autoFormatIfEnabled)
+  let formatPrompt = '';
+  try {
+    const promptUrl = await getTextkitEndpoint('/prompts/format');
+    const resp = await _fetchWithShortTimeout(promptUrl);
+    if (resp.ok) {
+      const data = await resp.json();
+      formatPrompt = data.template || '';
+    }
+  } catch {}
+  if (!formatPrompt) {
+    const stored = await chrome.storage.local.get('formatPrompt');
+    formatPrompt = stored.formatPrompt || '';
+  }
+  if (!formatPrompt || !formatPrompt.trim()) {
+    formatPrompt = 'Reformat the following text preserving all meaning. Fix punctuation, capitalization, paragraph breaks, and overall structure.';
+  }
+
+  const items = await chrome.storage.sync.get({
+    textkitHost: DEFAULT_HOST,
+    textkitPort: DEFAULT_TEXTKIT_PORT,
+  });
+
+  return handleFormatStart({
+    tabId,
+    text,
+    prompt: formatPrompt.trim(),
+    host: items.textkitHost,
+    port: items.textkitPort,
+  });
 }
 
 // ── Auto-translate helper (called from handleStart) ────────────

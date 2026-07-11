@@ -333,7 +333,7 @@
 <body>
   <div class="header">
     <h1>YT2TXT</h1>
-    <span class="version">v0.0.30</span>
+    <span class="version">v0.0.31</span>
   </div>
 
   <div class="tab-bar">
@@ -387,6 +387,11 @@
     </div>
 
     <div id="status-bar" class="status-bar">Ready</div>
+
+    <div id="format-retry-row" class="hidden" style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+      <button id="format-retry" class="secondary">Format Transcript</button>
+      <span id="format-retry-status" style="font-size:11px; color:#f87171;"></span>
+    </div>
 
     <textarea id="result" placeholder="Transcript will appear here..."></textarea>
 

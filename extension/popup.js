@@ -12,6 +12,9 @@ const startBtn = document.getElementById('start');
 const stopBtn = document.getElementById('stop');
 const statusBar = document.getElementById('status-bar');
 const resultEl = document.getElementById('result');
+const formatRetryRow = document.getElementById('format-retry-row');
+const formatRetryBtn = document.getElementById('format-retry');
+const formatRetryStatus = document.getElementById('format-retry-status');
 const copyBtn = document.getElementById('copy');
 const downloadBtn = document.getElementById('download');
 // ── Format panel elements ─────────────────────────────────────
@@ -126,6 +129,7 @@ resultEl.addEventListener('input', () => {
   updateResultButtons();
   updateTranslationButtons();
 });
+formatRetryBtn.addEventListener('click', retryFormat);
 
 // Translation panel
 tl2Translate.addEventListener('click', doTranslation);
@@ -191,9 +195,20 @@ chrome.runtime.onMessage.addListener((message) => {
     return;
   }
   if (message?.type === 'format:update') {
-    // Legacy TextKit format:update — no longer used by the unified popup
-    // (renderState() handles the new state:update broadcast).  Kept for
-    // backward compatibility with any external callers.
+    if (message.tabId !== currentTabId) return;
+    if (message.text) {
+      userEditedResult = false;
+      resultEl.value = message.text;
+      formatRetryRow.classList.add('hidden');
+      updateResultButtons();
+      updateTranslationButtons();
+      updateFormatButtons();
+      statusBar.textContent = 'Transcript formatted ✓';
+      statusBar.className = 'status-bar success';
+    } else if (message.error) {
+      formatRetryRow.classList.remove('hidden');
+      formatRetryStatus.textContent = message.error;
+    }
     return;
   }
 });
@@ -206,6 +221,7 @@ async function init() {
   // transcript populates the textarea instead of being blocked.
   if (newTabId !== currentTabId) {
     userEditedResult = false;
+    formatRetryRow.classList.add('hidden');
   }
   currentTabId = newTabId;
 
@@ -535,6 +551,7 @@ async function startCapture() {
   }
 
   userEditedResult = false;
+  formatRetryRow.classList.add('hidden');
   resultEl.value = '';
   copyBtn.disabled = true;
   downloadBtn.disabled = true;
@@ -796,6 +813,35 @@ function updateResultButtons() {
   const hasText = resultEl.value.trim().length > 0;
   copyBtn.disabled = !hasText;
   downloadBtn.disabled = !hasText;
+}
+
+// ── Format retry (manual re-trigger of TextKit formatting) ─────
+async function retryFormat() {
+  if (!currentTabId) return;
+  formatRetryBtn.disabled = true;
+  formatRetryStatus.textContent = 'Formatting...';
+  try {
+    const raw = await chrome.storage.local.get(`transcript_raw:${currentTabId}`);
+    const text = raw[`transcript_raw:${currentTabId}`];
+    if (!text) {
+      formatRetryStatus.textContent = 'No cached transcript available.';
+      return;
+    }
+    const response = await chrome.runtime.sendMessage({
+      type: 'format:retry',
+      tabId: currentTabId,
+      text,
+    });
+    if (response?.ok) {
+      formatRetryRow.classList.add('hidden');
+    } else {
+      formatRetryStatus.textContent = response?.error || 'Retry failed.';
+    }
+  } catch (e) {
+    formatRetryStatus.textContent = e.message || 'Retry failed.';
+  } finally {
+    formatRetryBtn.disabled = false;
+  }
 }
 
 // ── Render ─────────────────────────────────────────────────────
