@@ -386,7 +386,7 @@ handleStart() completes successfully
   │
   └─→ autoFormatIfEnabled(tab.id, transcriptText)
         Calls TextKit /format (TextKit resolves the prompt internally)
-        On success → replaces transcript:{tabId}, broadcasts format:update
+        On success → stores fmtResult:{tabId}, broadcasts format:update
         On failure → broadcasts format:update with error
 ```
 
@@ -621,109 +621,41 @@ if (!items.textkitHost) {
 
 ---
 
-## 9. File Changes List
+## 9. Key Implementation Details
 
-### 9.1 `extension/manifest.json` — MODIFY
+### 9.1 Extension manifest (`manifest.json`)
 
-- Add `"offscreen"` to permissions
-- Add `"clipboardWrite"` to permissions (already has `"downloads"` and `"storage"`)
-- Add `"notifications"` to permissions (for auto-copy/auto-save notifications)
-- Version bump
+Permissions: `activeTab`, `tabs`, `scripting`, `downloads`, `storage`, `clipboardWrite`, `notifications`, `offscreen`.
+Host permissions: localhost wildcards for both YT2TXT and TextKit backends.
+Commands: `Ctrl+Shift+T` / `Cmd+Shift+T` triggers transcript extraction.
 
-### 9.2 `extension/background.js` — MODIFY (major additions)
+### 9.2 Background service worker (`background.js`)
 
-**New constants:**
-- `DEFAULT_TEXTKIT_PORT = 8765`
+**Two cached URL builders:** `getYt2txtEndpoint()` (port 8666) and `getTextkitEndpoint()` (port 8765),
+each with 60-second cache expiry. Both use `buildBackendEndpoint()` + `normalizeBackendSettings()`.
 
-**New URL resolution:**
-- `getTextkitEndpoint(path)` function + cache
+**State management:**
+- `states` Map: per-tab transcript state
+- `translateControllers` / `formatControllers` Maps: separate AbortController per tab per operation
+- `popupFormatControllers` / `popupTranslateControllers` Maps: unified flow controllers
+- `keepAliveIntervalId`: prevents SW termination during long operations
 
-**New state management:**
-- `translateControllers` Map
-- `formatControllers` Map
-- `keepAliveIntervalId`
-- `startKeepAlive()` / `stopKeepAlive()`
+**Auto-action triggers (fire from `handleStart` after transcript completes):**
+- `autoTranslate()` — reads `tl2Language:{tabId}`, calls TextKit `/translate`
+- `autoFormatIfEnabled()` — calls TextKit `/format` (no prompt — TextKit resolves internally)
 
-**New message handlers (added to existing `chrome.runtime.onMessage`):**
-- `translate:start` → `handleTranslateStart()`
-- `translate:stop` → `handleTranslateStop()`
-- `format:start` → `handleFormatStart()`
-- `format:stop` → `handleFormatStop()`
-- `save:translation` → `handleSaveTranslation()`
+**Clipboard:** `copyToClipboard()` uses offscreen document for auto-copy from background.
 
-**New auto-action helpers:**
-- `autoTranslate(tabId, text)` — called from `handleStart()` on transcript completion
-- `autoFormatIfEnabled(tabId, text, host, port)` — called from translate/format completion
-- `autoCopyIfEnabled(text)` — uses offscreen document
-- `autoSaveIfEnabled(text)` — calls `/save`
-- `fmtAutoCopyIfEnabled(text)` — format-specific auto-copy
-- `fmtAutoSaveIfEnabled(text)` — format-specific auto-save
+### 9.3 Popup (`popup.html` + `popup.js`)
 
-**New clipboard helper:**
-- `copyToClipboard(text)` — creates offscreen document, sends copy message
+Three-tab layout: Transcript | Format | Translation. Backend settings behind gear icon.
+All long-running API calls go through background; lightweight path-autocomplete fetches
+use direct `fetch()` from popup with 10s timeout.
 
-**Modified:**
-- `handleStart()` — add auto-translate and auto-format triggers after successful transcript
-- `chrome.tabs.onRemoved` — add translate/format cleanup
-- `handleStop()` — add translate/format abort
+### 9.4 Offscreen document (`offscreen.html` + `offscreen.js`)
 
-### 9.3 `extension/popup.html` — MODIFY (major additions)
-
-- Add tab bar with three tabs
-- Wrap existing transcript UI in `#transcript-panel`
-- Add `#format-panel` with all Format tab elements
-- Add `#translation-panel` with all Translation tab elements
-- Add TextKit Host/Port inputs
-- Add tab-switching CSS
-
-### 9.4 `extension/popup.js` — MODIFY (major additions)
-
-**New element references:**
-- Tab buttons and panel elements
-- All Format tab elements (result textarea, buttons, checkboxes, save path)
-- All Translation tab elements (language selector, result textarea, buttons, checkboxes, save path)
-- TextKit host/port inputs
-
-**New functions:**
-- Tab switching logic
-- `doTranslation()` / `stopTranslation()`
-- `doFormat()` / `stopFormat()`
-- `saveTranslation()` / `saveFormatResult()`
-- `copyResult()` / `downloadAsFile()` (reusable for both tabs)
-- `setTl2Progress()` / `setFmtProgress()`
-- `updateTranslationButtons()` / `updateFormatButtons()`
-- `saveTl2Settings()` / `saveFormatSettings()`
-- `saveTl2Language()`
-- `loadPathSuggestions()` / `updatePathSuggestions()` / `fetchPathSuggestions()`
-- `saveTextkitBackend()` — save TextKit host/port to sync storage
-
-**New message listeners:**
-- `translation:update` — update translation result
-- `tl2:translating` — update translate button state
-- `format:update` — update format result
-- `fmt:formatting` — update format button state
-
-**Modified:**
-- `init()` — load TextKit settings, translation language, restore per-tab results
-- `renderState()` — update new tab button states when transcript changes
-- `saveSettings()` — rename to `saveYt2txtSettings()` and add `saveTextkitSettings()`
-
-### 9.5 `extension/offscreen.html` — NEW FILE
-
-Minimal HTML document that loads offscreen.js. Exact copy from TextKit.
-
-### 9.6 `extension/offscreen.js` — NEW FILE
-
-Clipboard handler using hidden textarea + `execCommand('copy')`. Exact copy from TextKit.
-
-### 9.7 CSS changes
-
-The existing yt2txt popup.css (inline in popup.html) uses a dark-first theme with `@media (prefers-color-scheme: light)` overrides. The new tab UI must follow the same style:
-
-- Tab bar: dark background (`#1e293b`), active tab with blue bottom border (`#38bdf8`), inactive tabs gray (`#94a3b8`)
-- Status bars: same pattern as existing `#status-bar` (one per tab: `#status-bar`, `#fmt-status-bar`, `#tl2-status-bar`)
-- Option rows: flex row with checkbox labels, matching existing style
-- Save path inputs: styled like existing `.settings input`
+Minimal HTML loading `offscreen.js`. Handles clipboard via hidden textarea + `execCommand('copy')`.
+Created on-demand by `copyToClipboard()`, closed after 2s.
 
 ---
 

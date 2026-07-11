@@ -8,7 +8,7 @@ A Chromium Manifest V3 extension + FastAPI backend that extracts transcripts fro
 extension/          ← Chrome MV3 extension (frontend)
   manifest.json
   background.js     ← service worker: all API calls happen here (popup is torn down on close)
-  popup.html        ← popup UI (Transcript + Translation tabs)
+  popup.html        ← popup UI (Transcript + Format + Translation tabs)
   popup.js          ← popup logic, delegates to background via messages
   icons/             ← icon16.png, icon48.png, icon128.png
 
@@ -115,7 +115,12 @@ cache:
 - Status bar showing progress.
 - Editable result textarea.
 - Copy, Download buttons (disabled when no result).
-- **Format button**: always visible, sends text to TextKit `/format`. Auto-format fires after successful transcript extraction. Button stays available after success for re-formatting.
+
+### Format tab
+- Status bar and result textarea.
+- Auto-copy, Auto-save checkboxes.
+- Save path input with TextKit backend path autocomplete.
+- Format/Stop, Copy, Save buttons.
 
 ### Translation tab
 - Language selector (Original, Chinese, English, Japanese, Korean, French, German, Spanish).
@@ -128,9 +133,8 @@ cache:
 ### Format flow
 - Auto-format fires from background after transcript extraction and after translation.
 - Format and translation prompts are owned by TextKit (Prompt tab + `PUT /prompts/{name}`); yt2txt sends no `prompt` field and TextKit resolves the prompt via its own chain.
-- Formatted text replaces the transcript cache (`transcript:${tabId}`) preserving the URL for tab-reopen validation.
+- Formatted text goes to the Format tab result (`format:update` broadcast → `#format-result`).
 - Raw transcript cached separately (`transcript_raw:${tabId}`) for retry on format failure.
-- Format button in Transcript tab is always visible for manual fail-safe re-formatting.
 
 ## Keyboard shortcut (Ctrl+Shift+T)
 - Gets current tab URL, starts transcript extraction in the background.
