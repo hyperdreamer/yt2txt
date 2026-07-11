@@ -175,6 +175,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       `tl2Translating:${tabId}`,
       `fmtResult:${tabId}`,
       `translate:language:${tabId}`,
+      `translate:result:${tabId}`,
     ])
     .catch(() => {});
 });
@@ -442,9 +443,26 @@ async function handleTranslateStart(msg) {
       .sendMessage({ type: 'tl2:translating', tabId, value: true })
       .catch(() => {});
 
+    // Update translate state so popup reopen restores "Stop" & progress.
+    let translateState = getState(tabId);
+    translateState.translate.active = true;
+    translateState.translate.status = 'Translating...';
+    translateState.translate.error = '';
+    translateState.translate.resultText = '';
+    broadcastState(tabId);
+
     try {
       // "Original" → pass through unchanged (no API call).
       if (language === 'original') {
+        // Persist result so popup init can restore it after reopen / SW restart.
+        const state = getState(tabId);
+        state.translate.resultText = text;
+        state.translate.status = 'Translation complete.';
+        state.translate.active = false;
+        state.translate.error = '';
+        await chrome.storage.local.set({ [`translate:result:${tabId}`]: text });
+        broadcastState(tabId);
+
         chrome.runtime
           .sendMessage({ type: 'translation:update', tabId, text, sourceUrl: msg.sourceUrl })
           .catch(() => {});
@@ -466,6 +484,16 @@ async function handleTranslateStart(msg) {
       if (payload.error) throw new Error(payload.error);
 
       const translated = payload.text || '';
+
+      // Persist result so popup init can restore it after reopen / SW restart.
+      const state = getState(tabId);
+      state.translate.resultText = translated;
+      state.translate.status = 'Translation complete.';
+      state.translate.active = false;
+      state.translate.error = '';
+      await chrome.storage.local.set({ [`translate:result:${tabId}`]: translated });
+      broadcastState(tabId);
+
       chrome.runtime
         .sendMessage({ type: 'translation:update', tabId, text: translated, sourceUrl: msg.sourceUrl })
         .catch(() => {});
@@ -476,6 +504,11 @@ async function handleTranslateStart(msg) {
       if (e.name === 'AbortError') {
         const message = timedOut ? 'Translation timed out.' : 'Translation stopped.';
         if (timedOut) {
+          const state = getState(tabId);
+          state.translate.error = message;
+          state.translate.status = message;
+          state.translate.active = false;
+          broadcastState(tabId);
           chrome.runtime
             .sendMessage({ type: 'translation:update', tabId, text: '', error: message })
             .catch(() => {});
@@ -483,6 +516,11 @@ async function handleTranslateStart(msg) {
         return { ok: !timedOut, error: timedOut ? message : undefined };
       }
       const errorMessage = e.message || 'Translation failed.';
+      const state = getState(tabId);
+      state.translate.error = errorMessage;
+      state.translate.status = errorMessage;
+      state.translate.active = false;
+      broadcastState(tabId);
       chrome.runtime
         .sendMessage({ type: 'translation:update', tabId, text: '', error: errorMessage })
         .catch(() => {});

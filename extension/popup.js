@@ -270,6 +270,18 @@ async function init() {
     }
   }
 
+  // Restore translation result (may have completed while popup was closed)
+  const tlResultKey = currentTabId ? `translate:result:${currentTabId}` : null;
+  if (tlResultKey && !tl2Result.value.trim()) {
+    const tlStored = await chrome.storage.local.get(tlResultKey);
+    if (tlStored[tlResultKey]) {
+      tl2Result.value = tlStored[tlResultKey];
+      tl2Copy.disabled = false;
+      tl2Save.disabled = false;
+      tl2Download.disabled = false;
+    }
+  }
+
   // Load translation tab language preference (per-tab)
   if (currentTabId) {
     const tl2Lang = await chrome.storage.local.get(`tl2Language:${currentTabId}`);
@@ -810,10 +822,29 @@ function renderState(state) {
     }
   }
 
-  // ── Translate tab state (legacy tl2-* flow renders separately) ──
-  // The legacy tl2:* messages are handled in the chrome.runtime.onMessage
-  // listener above; the renderState() function only needs to update the
-  // transcript tab here.
+  // ── Translate tab state ──
+  if (state.translate) {
+    if (state.translate.resultText && !tlUserEdited) {
+      tl2Result.value = state.translate.resultText;
+      tl2Copy.disabled = false;
+      tl2Save.disabled = false;
+      tl2Download.disabled = false;
+    }
+    if (state.translate.status) {
+      setTl2Progress(state.translate.status);
+    }
+    if (state.translate.active) {
+      tl2Translate.textContent = 'Stop';
+      tl2Translate.classList.add('danger');
+      tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
+    } else if (tl2Translate.textContent === 'Stop') {
+      tl2Translate.textContent = 'Translate';
+      tl2Translate.classList.remove('danger');
+    }
+    if (state.translate.error) {
+      setTl2Progress(state.translate.error);
+    }
+  }
 
   updateResultButtons();
   updateTranslationButtons();
