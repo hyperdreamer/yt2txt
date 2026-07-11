@@ -108,7 +108,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.37")
+app = FastAPI(title="YT2TXT", version="0.0.38")
 
 
 # ── Config (cached) ────────────────────────────────────────────────
@@ -664,21 +664,16 @@ def _get_cache_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(CACHE_DB_PATH), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("DROP TABLE IF EXISTS transcript_cache")
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS transcript_cache (
+        CREATE TABLE transcript_cache (
             video_id    TEXT PRIMARY KEY,
-            url         TEXT NOT NULL,
             text        TEXT NOT NULL,
             source      TEXT NOT NULL,
-            model       TEXT NOT NULL,
             created_at  TEXT NOT NULL DEFAULT (datetime('now'))
         )
         """
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_transcript_cache_created_at "
-        "ON transcript_cache(created_at)"
     )
     conn.commit()
     return conn
@@ -717,7 +712,7 @@ def _cache_get(video_id: str, ttl_days: int) -> dict | None:
     conn = _get_cache_db()
     try:
         cur = conn.execute(
-            "SELECT text, source, model, created_at FROM transcript_cache "
+            "SELECT text, source, created_at FROM transcript_cache "
             "WHERE video_id = ?",
             (video_id,),
         )
@@ -728,31 +723,24 @@ def _cache_get(video_id: str, ttl_days: int) -> dict | None:
     if not row:
         return None
 
-    text, source, model, created_at = row
+    text, source, created_at = row
     try:
-        # SQLite datetime('now') produces "YYYY-MM-DD HH:MM:SS" (space‑separated).
-        # strptime works on all Python versions; fromisoformat only accepts the
-        # space separator since Python 3.11 so we avoid it for portability.
         created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
     now = datetime.now(timezone.utc)
-    # SQLite datetime('now') returns UTC when used unqualified, but treat
-    # naive values as UTC defensively.
     if created_dt.tzinfo is None:
         created_dt = created_dt.replace(tzinfo=timezone.utc)
     if created_dt + timedelta(days=ttl_days) < now:
         return None
 
-    return {"text": text, "source": source, "model": model}
+    return {"text": text, "source": source}
 
 
 def _cache_put(
     video_id: str,
-    url: str,
     text: str,
     source: str,
-    model: str,
     ttl_days: int,
 ) -> None:
     """Insert or replace a cached transcript and prune expired rows."""
@@ -760,9 +748,9 @@ def _cache_put(
     try:
         conn.execute(
             "INSERT OR REPLACE INTO transcript_cache "
-            "(video_id, url, text, source, model, created_at) "
-            "VALUES (?, ?, ?, ?, ?, datetime('now'))",
-            (video_id, url, text, source, model),
+            "(video_id, text, source, created_at) "
+            "VALUES (?, ?, ?, datetime('now'))",
+            (video_id, text, source),
         )
         conn.execute(
             "DELETE FROM transcript_cache "
@@ -806,7 +794,7 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
                 return {
                     "text": cached["text"],
                     "source": cached["source"],
-                    "model": cached["model"],
+                    "model": "cached",
                     "error": None,
                 }
             _debug("cache", f"miss video_id={video_id}")
@@ -826,7 +814,7 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
             _debug("transcript", f"Extracted {len(text)} chars from subtitles")
             if config.cache_enabled and video_id is not None:
                 _cache_put(
-                    video_id, url, text, "subtitles", "yt-dlp", config.cache_ttl_days
+                    video_id, text, "subtitles", config.cache_ttl_days
                 )
                 _debug("cache", f"stored video_id={video_id} source=subtitles")
             return {
@@ -881,7 +869,7 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
 
         if config.cache_enabled and video_id is not None:
             _cache_put(
-                video_id, url, text, "transcription", model, config.cache_ttl_days
+                video_id, text, "transcription", config.cache_ttl_days
             )
             _debug("cache", f"stored video_id={video_id} source=transcription")
 
