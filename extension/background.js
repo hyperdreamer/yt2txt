@@ -142,10 +142,6 @@ function broadcastState(tabId) {
 // ── Translation / Format controllers ────────────────────────────
 const translateControllers = new Map();
 const formatControllers = new Map();
-// Unified (popup:format-* / popup:translate-*) controllers, separate
-// from the legacy TextKit ones above so both flows can run in parallel
-// without interfering with each other.
-const popupFormatControllers = new Map();
 let keepAliveIntervalId = null;
 
 function startKeepAlive() {
@@ -167,11 +163,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   if (state?.controller) {
     state.controller.abort();
   }
-  // Legacy TextKit flows
   handleTranslateStop(tabId);
   handleFormatStop(tabId);
-  // Unified YT2TXT flows
-  handlePopupFormatStop(tabId);
   states.delete(tabId);
   chrome.storage.local
     .remove([
@@ -180,7 +173,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       `status:${tabId}`,
       `tl2Language:${tabId}`,
       `tl2Translating:${tabId}`,
-      `fmtFormatting:${tabId}`,
+      `fmtResult:${tabId}`,
       `translate:language:${tabId}`,
     ])
     .catch(() => {});
@@ -230,31 +223,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true });
     return false;
   }
-  if (message?.type === 'format:retry') {
-    handleFormatRetry(message)
-      .then((r) => sendResponse(r))
-      .catch((e) => sendResponse({ ok: false, error: e.message }));
-    return true;
-  }
   if (message?.type === 'save:translation') {
     handleSaveTranslation(message)
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: e.message }));
     return true;
   }
-  // Unified Format tab (calls YT2TXT backend /format)
-  if (message?.type === 'popup:format-start') {
-    handlePopupFormatStart(message)
-      .then((r) => sendResponse(r))
-      .catch((e) => sendResponse({ ok: false, error: e.message }));
-    return true;
-  }
-  if (message?.type === 'popup:format-stop') {
-    handlePopupFormatStop(message.tabId);
-    sendResponse({ ok: true });
-    return false;
-  }
-  // Unified Translate tab (calls YT2TXT backend /translate)
 
   return false;
 });
@@ -407,11 +381,15 @@ async function handleStart(msg) {
 
   // Fire auto-actions after a successful transcript extraction.
   // Chain: Transcript → Format → Translate (sequential).
-  // autoFormat fires first; format completion triggers autoTranslate.
+  // Format fires first; format completion triggers autoTranslate.
   if (resultText) {
     // Cache original transcript before formatting (for retry on format failure)
     await chrome.storage.local.set({ [`transcript_raw:${tab.id}`]: resultText });
-    try { await autoFormat(tab.id, resultText, msg.url); } catch (e) { console.error('autoFormat failed:', e); }
+    try {
+      await handleFormatStart({ tabId: tab.id, text: resultText, sourceUrl: msg.url });
+    } catch (e) {
+      console.error('auto-format failed:', e);
+    }
   }
 
   return { ok: true };
@@ -426,11 +404,8 @@ async function handleStop() {
   if (state.controller) {
     state.controller.abort();
   }
-  // Legacy TextKit flows
   handleTranslateStop(tab.id);
   handleFormatStop(tab.id);
-  // Unified YT2TXT flows
-  handlePopupFormatStop(tab.id);
 
   updateState(tab.id, {
     progress: 'Stopping...',
@@ -553,114 +528,16 @@ async function handleSaveTranslation(msg) {
   return { ok: true, path: payload.path || path };
 }
 
-// ── Handle format start ────────────────────────────────────────
+// ── Handle format start (canonical) ────────────────────────────
 async function handleFormatStart(msg) {
-  const { tabId, text, host, port } = msg;
+  const { tabId, text } = msg;
   if (!tabId || !text) return { ok: false, error: 'Missing tabId or text' };
 
-  // Abort any in-flight formatting for this tab
-  handleFormatStop(tabId);
-
-  const controller = new AbortController();
-  let timedOut = false;
-  let timeoutId = null;
-
-  try {
-    formatControllers.set(tabId, controller);
-    startKeepAlive();
-    timeoutId = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, BACKEND_TIMEOUT_MS);
-
-    // Persist state so popup reopen shows "Stop" button.
-    await chrome.storage.local.set({
-      [`fmtFormatting:${tabId}`]: true,
-      [`fmtStatus:${tabId}`]: 'Formatting...',
-    });
-    await chrome.storage.local.remove(`fmtResult:${tabId}`);
-    chrome.runtime
-      .sendMessage({ type: 'fmt:formatting', tabId, value: true })
-      .catch(() => {});
-
-    try {
-      const baseUrl = await getTextkitEndpoint('/format');
-      const url = `${baseUrl}?_=${Date.now()}`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-        signal: controller.signal,
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-      if (payload.error) throw new Error(payload.error);
-
-      const formatted = payload.text || '';
-      chrome.runtime
-        .sendMessage({ type: 'format:update', tabId, text: formatted })
-        .catch(() => {});
-
-      // Auto-translate: format completion triggers translation (if enabled).
-      if (formatted) {
-        try { await autoTranslate(tabId, formatted, msg.sourceUrl); } catch (e) { console.error('autoTranslate from format failed:', e); }
-      }
-    } catch (e) {
-      if (e.name === 'AbortError') {
-        const message = timedOut ? 'Formatting timed out.' : 'Formatting stopped.';
-        await chrome.storage.local.set({ [`fmtStatus:${tabId}`]: message });
-        if (timedOut) {
-          chrome.runtime
-            .sendMessage({ type: 'format:update', tabId, text: '', error: message })
-            .catch(() => {});
-        }
-        return { ok: !timedOut, error: timedOut ? message : undefined };
-      }
-      const errorMessage = e.message || 'Formatting failed.';
-      await chrome.storage.local.set({ [`fmtStatus:${tabId}`]: errorMessage });
-      chrome.runtime
-        .sendMessage({ type: 'format:update', tabId, text: '', error: errorMessage })
-        .catch(() => {});
-      return { ok: false, error: errorMessage };
-    }
-  } finally {
-    clearTimeout(timeoutId);
-    if (formatControllers.get(tabId) === controller) {
-      formatControllers.delete(tabId);
-      chrome.storage.local.remove(`fmtFormatting:${tabId}`);
-      chrome.runtime
-        .sendMessage({ type: 'fmt:formatting', tabId, value: false })
-        .catch(() => {});
-    }
-    if (translateControllers.size === 0 && formatControllers.size === 0) stopKeepAlive();
-  }
-
-  return { ok: true };
-}
-
-// ── Handle format stop ─────────────────────────────────────────
-function handleFormatStop(tabId) {
-  const controller = formatControllers.get(tabId);
-  if (controller) {
-    controller.abort();
-    formatControllers.delete(tabId);
-    chrome.storage.local.remove(`fmtFormatting:${tabId}`);
-  }
-}
-
-// ── Unified Format handler (TextKit /format) ───────────────────
-async function handlePopupFormatStart(msg) {
-  const { tabId, text } = msg;
-  if (!tabId || !text) {
-    return { ok: false, error: 'Missing tabId or text.' };
-  }
   const state = getState(tabId);
-  if (state.format.active) {
-    return { ok: false, error: 'Format already in progress.' };
-  }
 
-  // Abort any in-flight unified format for this tab
-  handlePopupFormatStop(tabId);
+  // Abort-and-replace any in-flight formatting for this tab.
+  const existing = formatControllers.get(tabId);
+  if (existing) existing.abort();
 
   const controller = new AbortController();
   let timedOut = false;
@@ -669,16 +546,17 @@ async function handlePopupFormatStart(msg) {
     controller.abort();
   }, BACKEND_TIMEOUT_MS);
 
+  formatControllers.set(tabId, controller);
+  startKeepAlive();
+
+  state.format.sourceText = text;
+  state.format.resultText = '';
+  state.format.active = true;
+  state.format.status = 'Formatting...';
+  state.format.error = '';
+  broadcastState(tabId);
+
   try {
-    popupFormatControllers.set(tabId, controller);
-    startKeepAlive();
-
-    state.format.sourceText = text;
-    state.format.active = true;
-    state.format.status = 'Formatting...';
-    state.format.error = '';
-    broadcastState(tabId);
-
     const baseUrl = await getTextkitEndpoint('/format');
     const url = `${baseUrl}?_=${Date.now()}`;
     const response = await fetch(url, {
@@ -691,24 +569,24 @@ async function handlePopupFormatStart(msg) {
     if (!response.ok) {
       throw new Error(payload.error || payload.detail || `HTTP ${response.status}`);
     }
-    if (payload.error) {
-      throw new Error(payload.error);
-    }
+    if (payload.error) throw new Error(payload.error);
 
     const formatted = payload.text || '';
     state.format.resultText = formatted;
     state.format.status = 'Formatted ✓';
     state.format.error = '';
     state.format.active = false;
-
     broadcastState(tabId);
+
+    // Persist result so popup init can restore it after SW restart.
+    await chrome.storage.local.set({ [`fmtResult:${tabId}`]: formatted });
 
     // Auto-copy / auto-save formatted result
     if (formatted) {
       try { await fmtAutoCopyIfEnabled(formatted); } catch (e) { console.error('auto-copy fmt failed:', e); }
       try { await fmtAutoSaveIfEnabled(tabId, formatted); } catch (e) { console.error('auto-save fmt failed:', e); }
-      // Auto-translate: manual/auto format completion triggers translation (if enabled).
-      try { await autoTranslate(tabId, formatted); } catch (e) { console.error('autoTranslate from popup-format failed:', e); }
+      // Auto-translate: format completion triggers translation (if enabled).
+      try { await autoTranslate(tabId, formatted, msg.sourceUrl); } catch (e) { console.error('autoTranslate from format failed:', e); }
     }
   } catch (e) {
     if (e.name === 'AbortError') {
@@ -723,23 +601,19 @@ async function handlePopupFormatStart(msg) {
     broadcastState(tabId);
   } finally {
     clearTimeout(timeoutId);
-    if (popupFormatControllers.get(tabId) === controller) {
-      popupFormatControllers.delete(tabId);
+    if (formatControllers.get(tabId) === controller) {
+      formatControllers.delete(tabId);
     }
-    if (
-      popupFormatControllers.size === 0
-    ) {
-      stopKeepAlive();
-    }
+    if (translateControllers.size === 0 && formatControllers.size === 0) stopKeepAlive();
   }
   return { ok: true };
 }
 
-function handlePopupFormatStop(tabId) {
-  const controller = popupFormatControllers.get(tabId);
+function handleFormatStop(tabId) {
+  const controller = formatControllers.get(tabId);
   if (controller) {
     controller.abort();
-    popupFormatControllers.delete(tabId);
+    formatControllers.delete(tabId);
   }
   const state = states.get(tabId);
   if (state?.format?.active) {
@@ -748,8 +622,6 @@ function handlePopupFormatStop(tabId) {
     broadcastState(tabId);
   }
 }
-
-
 
 // ── Clipboard ──────────────────────────────────────────────────
 async function copyToClipboard(text) {
@@ -853,54 +725,6 @@ async function fmtAutoSaveIfEnabled(tabId, text) {
       priority: 1,
     });
   }
-}
-
-// ── Auto-format helper ─────────────────────────────────────────
-async function _fetchWithShortTimeout(url) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10_000);
-  try {
-    return await fetch(url, { signal: controller.signal });
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-async function autoFormat(tabId, text, sourceUrl, host, port) {
-  // Fall back to sync storage if caller didn't provide host/port
-  if (!host || port === undefined) {
-    const backend = await chrome.storage.sync.get({
-      textkitHost: DEFAULT_HOST,
-      textkitPort: DEFAULT_TEXTKIT_PORT,
-    });
-    host = backend.textkitHost;
-    port = backend.textkitPort;
-  }
-  handleFormatStart({
-    tabId,
-    text,
-    host,
-    port,
-    sourceUrl,
-  }).catch((e) => console.error('autoFormat failed:', e));
-}
-
-// ── Format retry helper (called from popup retry button) ───────
-async function handleFormatRetry(msg) {
-  const { tabId, text } = msg;
-  if (!tabId || !text) return { ok: false, error: 'Missing tabId or text.' };
-
-  const items = await chrome.storage.sync.get({
-    textkitHost: DEFAULT_HOST,
-    textkitPort: DEFAULT_TEXTKIT_PORT,
-  });
-
-  return handleFormatStart({
-    tabId,
-    text,
-    host: items.textkitHost,
-    port: items.textkitPort,
-  });
 }
 
 // ── Auto-translate helper (called from format completion) ─────

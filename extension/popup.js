@@ -186,20 +186,6 @@ chrome.runtime.onMessage.addListener((message) => {
     }
     return;
   }
-  if (message?.type === 'format:update') {
-    if (message.tabId !== currentTabId) return;
-    if (message.text) {
-      formatResult.value = message.text;
-      formatCopy.disabled = false;
-      formatSave.disabled = !!formatResult.value.trim();
-      formatRetryRow.classList.add('hidden');
-      setFormatStatus('Formatted ✓');
-    } else if (message.error) {
-      formatRetryRow.classList.remove('hidden');
-      formatRetryStatus.textContent = message.error;
-    }
-    return;
-  }
 });
 
 // ── Init ───────────────────────────────────────────────────────
@@ -552,7 +538,7 @@ async function doFormat() {
     formatBtn.disabled = true;
     try {
       await chrome.runtime.sendMessage({
-        type: 'popup:format-stop',
+        type: 'format:stop',
         tabId: currentTabId,
       });
     } catch {}
@@ -574,7 +560,7 @@ async function doFormat() {
 
   try {
     const response = await chrome.runtime.sendMessage({
-      type: 'popup:format-start',
+      type: 'format:start',
       tabId: currentTabId,
       text,
     });
@@ -751,7 +737,7 @@ async function retryFormat() {
       return;
     }
     const response = await chrome.runtime.sendMessage({
-      type: 'format:retry',
+      type: 'format:start',
       tabId: currentTabId,
       text,
     });
@@ -813,6 +799,14 @@ function renderState(state) {
         formatCopy.disabled = false;
         formatSave.disabled = false;
       }
+    }
+    // Show the format-retry row when the format flow is idle but
+    // produced an error. This replaces the legacy format:update handler.
+    if (state.format.error && !state.format.active) {
+      formatRetryRow.classList.remove('hidden');
+      formatRetryStatus.textContent = state.format.error;
+    } else if (state.format.resultText) {
+      formatRetryRow.classList.add('hidden');
     }
   }
 
