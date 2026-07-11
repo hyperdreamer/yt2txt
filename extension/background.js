@@ -423,11 +423,11 @@ async function handleStart(msg) {
 
   // Fire auto-actions after a successful transcript extraction.
   // Chain: Transcript → Format → Translate (sequential).
-  // autoFormatIfEnabled fires first; format completion triggers autoTranslate.
+  // autoFormat fires first; format completion triggers autoTranslate.
   if (resultText) {
     // Cache original transcript before formatting (for retry on format failure)
     await chrome.storage.local.set({ [`transcript_raw:${tab.id}`]: resultText });
-    try { await autoFormatIfEnabled(tab.id, resultText, msg.url); } catch (e) { console.error('autoFormatIfEnabled failed:', e); }
+    try { await autoFormat(tab.id, resultText, msg.url); } catch (e) { console.error('autoFormat failed:', e); }
   }
 
   return { ok: true };
@@ -997,7 +997,7 @@ async function _fetchWithShortTimeout(url) {
   }
 }
 
-async function autoFormatIfEnabled(tabId, text, sourceUrl, host, port) {
+async function autoFormat(tabId, text, sourceUrl, host, port) {
   // Fall back to sync storage if caller didn't provide host/port
   if (!host || port === undefined) {
     const backend = await chrome.storage.sync.get({
@@ -1013,7 +1013,7 @@ async function autoFormatIfEnabled(tabId, text, sourceUrl, host, port) {
     host,
     port,
     sourceUrl,
-  }).catch((e) => console.error('autoFormatIfEnabled failed:', e));
+  }).catch((e) => console.error('autoFormat failed:', e));
 }
 
 // ── Format retry helper (called from popup retry button) ───────

@@ -376,7 +376,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 ```
 handleStart() completes successfully
   │
-  └─→ autoFormatIfEnabled(tab.id, transcriptText)
+  └─→ autoFormat(tab.id, transcriptText)
         Calls TextKit /format (TextKit resolves the prompt internally)
         On success → stores fmtResult:{tabId}, broadcasts format:update
           └─→ auto-translate is triggered from format completion (see 5.2)
@@ -432,10 +432,10 @@ Transcript completes
 
 **Important**: Auto-format always fires after transcript extraction (unconditionally). Translation only fires after format (raw or manual) when `yt2txtAutoTranslate` is enabled. Auto-format does NOT fire again after translation — the chain ends at Translate.
 
-### 5.5 Auto-format helper
+### 5.5 Auto-format
 
 ```javascript
-async function autoFormatIfEnabled(tabId, text, host, port) {
+async function autoFormat(tabId, text, host, port) {
   // Fall back to sync storage if caller didn't provide host/port
   if (!host || port === undefined) {
     const backend = await chrome.storage.sync.get({
@@ -635,7 +635,7 @@ each with 60-second cache expiry. Both use `buildBackendEndpoint()` + `normalize
 - `keepAliveIntervalId`: prevents SW termination during long operations
 
 **Auto-action triggers:**
-- Transcript completes → `autoFormatIfEnabled()` — calls TextKit `/format`
+- Transcript completes → `autoFormat()` — calls TextKit `/format` (unconditional)
 - Format completes → `autoTranslate()` — reads `tl2Language:{tabId}`, calls TextKit `/translate` (if enabled)
 - Translation completes → auto-copy + auto-save (if enabled)
 
