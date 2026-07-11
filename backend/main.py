@@ -94,7 +94,7 @@ def load_config() -> AppConfig:
 
     model = str(ai_section.get("model", DEFAULT_MODEL))
 
-    return AppConfig(
+    config = AppConfig(
         host=str(raw.get("host", DEFAULT_HOST)),
         port=int(raw.get("port", DEFAULT_PORT)),
         debug=bool(raw.get("debug", False)),
@@ -104,11 +104,14 @@ def load_config() -> AppConfig:
         cache_enabled=bool(cache_section.get("enabled", True)),
         cache_ttl_days=int(cache_section.get("ttl_days", 30)),
     )
+    global _debug_enabled
+    _debug_enabled = config.debug
+    return config
 
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="1.0.1")
+app = FastAPI(title="YT2TXT", version="1.0.2")
 
 
 # ── Config (cached) ────────────────────────────────────────────────
@@ -280,7 +283,7 @@ def _parse_subtitle_text(path: str) -> str:
     return "\n".join(lines)
 
 
-def _resolve_subs_path(tmpdir: str, url: str) -> str | None:
+def _resolve_subs_path(tmpdir: str) -> str | None:
     """Return the first .srt/.vtt path written into tmpdir, or None."""
     for fname in os.listdir(tmpdir):
         if not fname.endswith((".srt", ".vtt")):
@@ -308,7 +311,7 @@ async def _download_subs_manual(url: str, tmpdir: str) -> str | None:
     except HTTPException as exc:
         _debug("subs", f"manual download failed: {exc.detail}")
         return None
-    return _resolve_subs_path(tmpdir, url)
+    return _resolve_subs_path(tmpdir)
 
 
 async def _download_subs_auto(url: str, tmpdir: str) -> str | None:
@@ -328,7 +331,7 @@ async def _download_subs_auto(url: str, tmpdir: str) -> str | None:
     except HTTPException as exc:
         _debug("subs", f"auto download failed: {exc.detail}")
         return None
-    return _resolve_subs_path(tmpdir, url)
+    return _resolve_subs_path(tmpdir)
 
 
 # ── OpenAI transcription ────────────────────────────────────────

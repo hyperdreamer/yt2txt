@@ -6,8 +6,6 @@ const BACKEND_TIMEOUT_MS = 12 * 60 * 1000; // 12 minutes (translation/format may
 const TRANSCRIPT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 const LOCAL_BACKEND_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
-// Map transcript language codes to translation target names.
-// When source == target, no API call is needed — just pass through.
 // ── Backend URL cache (yt2txt) ──────────────────────────────────
 let _yt2txtBaseUrl = null;
 let _yt2txtBaseUrlExpiry = 0;

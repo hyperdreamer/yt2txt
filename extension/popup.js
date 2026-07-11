@@ -81,20 +81,6 @@ function switchTab(panelName) {
   // 2. Show/hide panels
   Object.values(panels).forEach((p) => p.classList.add('hidden'));
   if (panels[panelName]) panels[panelName].classList.remove('hidden');
-
-  // 3. Auto-fill downstream data (Format tab uses transcript result implicitly)
-  if (panelName === 'translation-panel' && !tl2Result.value.trim()) {
-    // Pre-fill translate source from format result, falling back to transcript.
-    const formatOutput = formatResult.value.trim();
-    const transcriptText = resultEl.value.trim();
-    const next = formatOutput || transcriptText;
-    if (next && !tl2Result.value.trim()) {
-      // The legacy tl2-* flow does not have a separate "source" textarea —
-      // the transcript is taken from resultEl on Translate.  No need to
-      // populate anything here; this is the unified-format-tab flow
-      // (which is not used by the legacy tl2-* buttons).
-    }
-  }
 }
 
 // ── Event listeners ───────────────────────────────────────────
