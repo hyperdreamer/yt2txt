@@ -108,7 +108,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.40")
+app = FastAPI(title="YT2TXT", version="0.0.41")
 
 
 # ── Config (cached) ────────────────────────────────────────────────
@@ -170,15 +170,6 @@ def _debug(tag: str, msg: str) -> None:
     print(f"[DEBUG][{tag}] {ts} {msg}", file=sys.stderr, flush=True)
 
 
-def _error_message(exc: Exception, is_client_error: bool = False) -> str:
-    """Return a safe error message for the client."""
-    if is_client_error:
-        return str(exc)
-    if PRODUCTION:
-        return "Request failed. Check server logs for details."
-    return str(exc)
-
-
 # ── Graceful shutdown ───────────────────────────────────────────
 
 
@@ -197,7 +188,6 @@ signal.signal(signal.SIGINT, _handle_shutdown)
 class TranscriptRequest(BaseModel):
     url: str
     model: str | None = None
-    language: str = ""
     force: bool = False
 
 
@@ -379,7 +369,7 @@ async def _get_audio_duration(audio_path: str) -> float:
 
 
 async def _transcribe_file(
-    audio_path: str, config: AppConfig, model: str, chunk_label: str = "", language: str = ""
+    audio_path: str, config: AppConfig, model: str, chunk_label: str = ""
 ) -> str:
     """Send a single audio file to OpenAI /v1/audio/transcriptions and return text."""
     if not config.api_key:
@@ -412,8 +402,6 @@ async def _transcribe_file(
         ("model", safe_model),
         ("response_format", "text"),
     ]
-    if language:
-        fields.append(("language", language))
     for field_name, field_value in fields:
         body += f"--{boundary}\r\n".encode()
         body += f'Content-Disposition: form-data; name="{field_name}"\r\n\r\n'.encode()
@@ -516,7 +504,7 @@ def _deduplicate_overlap(text_a: str, text_b: str, max_overlap: int = 300) -> st
     return text_b
 
 
-async def _transcribe_audio(audio_path: str, config: AppConfig, model: str, language: str = "") -> str:
+async def _transcribe_audio(audio_path: str, config: AppConfig, model: str) -> str:
     """Transcribe audio, chunking if file exceeds OpenAI's 25MB limit or 1400s duration.
 
     If the file is ≤24MB and ≤1300s, transcribes directly.
@@ -664,10 +652,9 @@ def _get_cache_db() -> sqlite3.Connection:
     conn = sqlite3.connect(str(CACHE_DB_PATH), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("DROP TABLE IF EXISTS transcript_cache")
     conn.execute(
         """
-        CREATE TABLE transcript_cache (
+        CREATE TABLE IF NOT EXISTS transcript_cache (
             video_id    TEXT PRIMARY KEY,
             text        TEXT NOT NULL,
             source      TEXT NOT NULL,

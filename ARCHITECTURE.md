@@ -625,7 +625,7 @@ if (!items.textkitHost) {
 
 ### 9.1 Extension manifest (`manifest.json`)
 
-Permissions: `activeTab`, `tabs`, `scripting`, `downloads`, `storage`, `clipboardWrite`, `notifications`, `offscreen`.
+Permissions: `activeTab`, `tabs`, `scripting`, `downloads`, `storage`, `offscreen`, `notifications`.
 Host permissions: localhost wildcards for both YT2TXT and TextKit backends.
 Commands: `Ctrl+Shift+T` / `Cmd+Shift+T` triggers transcript extraction.
 
