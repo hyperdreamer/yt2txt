@@ -74,14 +74,14 @@ The server starts on `http://127.0.0.1:8666` by default.
 
 ### Format tab
 
-1. Switch to the **Format** tab
-2. Click **Format** to clean up and structure the transcript (or enable auto-format in settings)
+1. Format runs automatically after transcript extraction (no toggle needed)
+2. Or switch to the **Format** tab and click **Format** to re-run on current text
 3. Copy or save the formatted result
 
 ### Translation tab
 
 1. Select a target language
-2. Click **Translate** — or enable **Auto-translate** to translate automatically after extraction
+2. Click **Translate** — or enable **Auto-translate** to translate automatically after formatting
 3. Enable **Auto-copy** / **Auto-save** for hands-off workflow
 4. When the transcript language matches the target, no API call is made — text passes through directly
 5. Translation and formatting prompts are managed in the **TextKit** backend (Prompt tab / `PUT /prompts/{name}`)

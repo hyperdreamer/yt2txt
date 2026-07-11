@@ -131,7 +131,9 @@ cache:
 - **Same-language skip**: when transcript language matches target (e.g. JA→Japanese), no API call — text passes through directly, triggering auto-copy/auto-save if enabled.
 
 ### Format flow
-- Auto-format fires from background after transcript extraction and after translation.
+- Auto-format fires from background after transcript extraction (always — no toggle).
+- Format completion triggers auto-translate (if `yt2txtAutoTranslate` is enabled).
+- Auto-translate uses the formatted text, not the raw transcript.
 - Format and translation prompts are owned by TextKit (Prompt tab + `PUT /prompts/{name}`); yt2txt sends no `prompt` field and TextKit resolves the prompt via its own chain.
 - Formatted text goes to the Format tab result (`format:update` broadcast → `#format-result`).
 - Raw transcript cached separately (`transcript_raw:${tabId}`) for retry on format failure.
