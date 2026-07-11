@@ -44,8 +44,7 @@ popup.html
 │   ├── textarea#fmt-result (readonly)
 │   ├── .option-row
 │   │   ├── label > input[checkbox]#fmt-autocopy    "Auto-copy"
-│   │   ├── label > input[checkbox]#fmt-autosave    "Auto-save"
-│   │   └── label > input[checkbox]#fmt-autoformat  "Auto-format"
+│   │   └── label > input[checkbox]#fmt-autosave    "Auto-save"
 │   ├── .save-row
 │   │   └── label "Save path" > input#fmt-save-path (with datalist#fmt-path-suggestions)
 │   └── .actions
@@ -323,9 +322,7 @@ Translation/Format progress is stored in `chrome.storage.local` (survives SW res
 | `yt2txtAutoTranslate` | boolean | `false` | **NEW** Auto-translate when transcript completes |
 | `fmtAutoCopy` | boolean | `false` | **NEW** Auto-copy format result |
 | `fmtAutoSave` | boolean | `false` | **NEW** Auto-save format result |
-| `fmtAutoFormat` | boolean | `false` | **NEW** Auto-format when source text completes |
-| `fmtSavePath` | string | `''` | **NEW** Save path for format auto-save |
-| `fmtSourceVal` | string | `'transcript'` | **NEW** Default source for Format tab |
+| `fmtAutoSavePath` | string | `''` | **NEW** Save path for format auto-save |
 
 ### 3.5 Tab-close cleanup
 
@@ -403,12 +400,11 @@ handleStart() completes successfully
   │     On success → stores tl2Result:{tabId}, broadcasts translation:update
   │     Then triggers auto-copy/auto-save/auto-format for translation (see 5.2)
   │
-  └─→ [if fmtAutoFormat AND fmtSourceVal='transcript']
-        autoFormat(tabId, transcriptText, textkitHost, textkitPort)
-        Reads formatPrompt from local storage
+  └─→ autoFormatIfEnabled(tab.id, transcriptText)
+        Resolves format prompt from textkit → local storage → default
         Calls TextKit /format
-        On success → stores fmtResult:{tabId}, broadcasts format:update
-        Then triggers auto-copy/auto-save for format (see 5.3)
+        On success → replaces transcript:{tabId}, broadcasts format:update
+        On failure → broadcasts format:update with error
 ```
 
 ### 5.2 Trigger: Translation completes
@@ -424,8 +420,7 @@ handleTranslateStart() completes successfully (translated text is non-empty)
   │     Calls TextKit /save
   │     Shows notification on success/failure
   │
-  └─→ [if fmtAutoFormat AND fmtSourceVal='translation']
-        autoFormat(tabId, translatedText, textkitHost, textkitPort)
+  └─→ autoFormatIfEnabled(tabId, translatedText, host, port)
         Same as above — calls TextKit /format
 ```
 
@@ -438,7 +433,7 @@ handleFormatStart() completes successfully (formatted text is non-empty)
   │     Uses offscreen document pattern
   │     Shows notification
   │
-  └─→ [if fmtAutoSave AND fmtSavePath] handleSaveTranslation({text, path})
+  └─→ [if fmtAutoSave AND fmtAutoSavePath] handleSaveTranslation({text, path})
         Calls TextKit /save
         Shows notification on success/failure
 ```
@@ -448,43 +443,36 @@ handleFormatStart() completes successfully (formatted text is non-empty)
 ```
 Transcript completes
   → auto-translate enabled, language=Chinese
-    → auto-format enabled, source=translation
-      → Translation completes → auto-format fires
-        → Format completes → auto-copy + auto-save fire
+    → Translation completes → auto-format fires
+      → Format completes → auto-copy + auto-save fire
 
 AND (in parallel):
 
 Transcript completes
-  → auto-format enabled, source=transcript
+  → auto-format fires immediately
     → Format completes → auto-copy + auto-save fire
 ```
 
-**Important**: The two paths (auto-format from transcript vs auto-format from translation) are independent. If both `fmtAutoFormat` with source=transcript AND `yt2txtAutoTranslate` with `fmtAutoFormat` source=translation are enabled, the format will fire twice — once with transcript text, once with translated text. The second run overwrites `fmtResult:{tabId}`. This is expected behavior.
+**Important**: Auto-format always fires after transcript extraction (unconditionally). If auto-translate is also enabled, format will fire twice — once with transcript text, once with translated text. The second run replaces the first. This is expected behavior.
 
 ### 5.5 Auto-format helper
 
 ```javascript
 async function autoFormatIfEnabled(tabId, text, host, port) {
-  const { fmtAutoFormat } = await chrome.storage.sync.get({ fmtAutoFormat: false });
-  if (!fmtAutoFormat) return;
-
-  const { formatPrompt } = await chrome.storage.local.get('formatPrompt');
-  if (!formatPrompt || !formatPrompt.trim()) return;
-
-  // Fall back to stored TextKit backend settings if caller didn't provide
+  const formatPrompt = await resolveFormatPrompt();
+  // Fall back to sync storage if caller didn't provide host/port
   if (!host || port === undefined) {
     const backend = await chrome.storage.sync.get({
-      textkitHost: 'localhost',
-      textkitPort: 8765
+      textkitHost: DEFAULT_HOST,
+      textkitPort: DEFAULT_TEXTKIT_PORT,
     });
     host = backend.textkitHost;
     port = backend.textkitPort;
   }
-
   handleFormatStart({
     tabId, text,
-    prompt: formatPrompt.trim(),
-    host, port
+    prompt: formatPrompt,
+    host, port,
   }).catch(() => {});
 }
 ```
@@ -507,17 +495,13 @@ tl2AutoSavePath     string   ""          (NEW)
 yt2txtAutoTranslate boolean  false       (NEW)
 fmtAutoCopy         boolean  false       (NEW)
 fmtAutoSave         boolean  false       (NEW)
-fmtAutoFormat       boolean  false       (NEW)
-fmtSavePath         string   ""          (NEW)
-fmtSourceVal        string   "transcript"(NEW)
+fmtAutoSavePath     string   ""          (NEW)
 ```
 
 ### chrome.storage.local (global)
 
 ```
-formatPrompt              string   ""          (NEW)
 translatePrompt:${lang}   string   ""          (NEW, one per language)
-tl2PathHistory            array    []          (NEW, save path autocomplete)
 ```
 
 ### chrome.storage.local (per-tab, suffixed with `:${tabId}`)
@@ -776,7 +760,7 @@ popup.js init()
      - yt2txtHost, yt2txtPort, yt2txtLang (existing)
      - textkitHost, textkitPort (NEW)
      - tl2AutoCopy, tl2AutoSave, tl2AutoSavePath, yt2txtAutoTranslate (NEW)
-     - fmtAutoCopy, fmtAutoSave, fmtAutoFormat, fmtSavePath, fmtSourceVal (NEW)
+     - fmtAutoCopy, fmtAutoSave, fmtAutoSavePath (NEW)
   3. Pre-fill URL from current tab (existing)
   4. Refresh transcript state from background (existing)
   5. Load persisted transcript result (existing)
