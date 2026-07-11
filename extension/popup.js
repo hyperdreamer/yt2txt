@@ -6,6 +6,16 @@ const panels = {
   'translation-panel': document.getElementById('translation-panel'),
 };
 
+// ── Settings gear ─────────────────────────────────────────────
+const settingsGear = document.getElementById('settings-gear');
+const settingsPanel = document.getElementById('backend-settings-panel');
+
+settingsGear.addEventListener('click', () => {
+  const isOpen = !settingsPanel.classList.contains('hidden');
+  settingsPanel.classList.toggle('hidden', isOpen);
+  settingsGear.classList.toggle('active', !isOpen);
+});
+
 // ── Transcript panel elements ─────────────────────────────────
 const urlInput = document.getElementById('url');
 const startBtn = document.getElementById('start');

@@ -30,6 +30,35 @@
       color: #64748b;
     }
 
+    .gear-btn {
+      background: none;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      color: #64748b;
+      font-size: 15px;
+      cursor: pointer;
+      padding: 2px 5px;
+      margin-left: auto;
+      line-height: 1;
+    }
+    .gear-btn:hover {
+      background: #1e293b;
+      color: #94a3b8;
+    }
+    .gear-btn.active {
+      background: #1e293b;
+      color: #38bdf8;
+    }
+
+    .settings-panel {
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      background: #1a2332;
+    }
+    .settings-panel .backend-row:last-child { margin-bottom: 0; }
+
     .tab-bar {
       display: flex;
       border-bottom: 2px solid #334155;
@@ -53,9 +82,6 @@
       border-bottom-color: #38bdf8;
     }
 
-    .backend-settings {
-      margin-bottom: 10px;
-    }
     .backend-row {
       display: flex;
       gap: 8px;
@@ -130,11 +156,6 @@
     }
     #url:focus { border-color: #38bdf8; outline: none; }
 
-    .actions {
-      display: flex;
-      gap: 6px;
-      margin-bottom: 12px;
-    }
     button {
       padding: 6px 14px;
       border: none;
@@ -174,7 +195,7 @@
     }
     #result:focus { border-color: #38bdf8; outline: none; }
 
-    .result-actions {
+    .actions {
       display: flex; gap: 6px; margin-top: 8px;
     }
 
@@ -269,6 +290,15 @@
       .tab { color: #64748b; }
       .tab.active { color: #0284c7; border-bottom-color: #0284c7; }
 
+      .gear-btn { color: #94a3b8; }
+      .gear-btn:hover { background: #e2e8f0; color: #334155; }
+      .gear-btn.active { background: #e2e8f0; color: #0284c7; }
+
+      .settings-panel {
+        border-color: #cbd5e1;
+        background: #f1f5f9;
+      }
+
       .backend-row input {
         border-color: #cbd5e1; background: #ffffff; color: #0f172a;
       }
@@ -334,6 +364,7 @@
   <div class="header">
     <h1>YT2TXT</h1>
     <span class="version">v0.0.38</span>
+    <button id="settings-gear" class="gear-btn" title="Backend Settings">⚙</button>
   </div>
 
   <div class="tab-bar">
@@ -342,7 +373,7 @@
     <button class="tab" data-panel="translation-panel">Translation</button>
   </div>
 
-  <div class="backend-settings">
+  <div id="backend-settings-panel" class="settings-panel hidden">
     <div class="backend-row">
       <span class="row-label">YT2TXT</span>
       <label>Host <input id="host" type="text" placeholder="localhost"></label>
@@ -360,12 +391,6 @@
       <input id="url" type="text" placeholder="Paste video URL or use current page...">
     </div>
 
-    <div class="actions">
-      <button id="start" class="primary">Get Transcript</button>
-      <label class="force-label"><input type="checkbox" id="force"> Force refresh</label>
-      <button id="stop" class="danger hidden">Stop</button>
-    </div>
-
     <div id="status-bar" class="status-bar">Ready</div>
 
     <div id="format-retry-row" class="hidden" style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
@@ -375,7 +400,10 @@
 
     <textarea id="result" placeholder="Transcript will appear here..."></textarea>
 
-    <div class="result-actions">
+    <div class="actions">
+      <button id="start" class="primary">Get Transcript</button>
+      <label class="force-label"><input type="checkbox" id="force"> Force refresh</label>
+      <button id="stop" class="danger hidden">Stop</button>
       <button id="copy" class="secondary" disabled>Copy</button>
       <button id="download" class="secondary" disabled>Download</button>
     </div>
@@ -389,9 +417,6 @@
       <summary>Formatting Instructions (optional)</summary>
       <textarea id="format-prompt" placeholder="E.g.: Format this transcript into well-structured paragraphs..."></textarea>
     </details>
-    <div class="actions">
-      <button id="format-btn" class="primary" disabled>Format</button>
-    </div>
     <div id="format-status-bar" class="status-bar">Ready</div>
     <label class="panel-label" for="format-result">Formatted Result</label>
     <textarea id="format-result" readonly placeholder="Formatted text will appear here..."></textarea>
@@ -404,7 +429,8 @@
       <input id="fmt-autosave-path" type="text" placeholder="e.g. transcripts/formatted.txt" list="fmt-path-suggestions">
       <datalist id="fmt-path-suggestions"></datalist>
     </div>
-    <div class="result-actions">
+    <div class="actions">
+      <button id="format-btn" class="primary" disabled>Format</button>
       <button id="format-copy" class="secondary" disabled>Copy</button>
       <button id="format-save" class="secondary" disabled>Save</button>
     </div>
