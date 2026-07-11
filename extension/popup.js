@@ -26,7 +26,6 @@ const formatCopy = document.getElementById('format-copy');
 const formatSave = document.getElementById('format-save');
 const fmtAutocopyCheckbox = document.getElementById('fmt-autocopy');
 const fmtAutosaveCheckbox = document.getElementById('fmt-autosave');
-const fmtAutoformatCheckbox = document.getElementById('fmt-autoformat');
 const fmtAutosavePath = document.getElementById('fmt-autosave-path');
 const fmtPathSuggestions = document.getElementById('fmt-path-suggestions');
 const hostInput = document.getElementById('host');
@@ -116,7 +115,6 @@ formatPrompt.addEventListener('input', () => {
 formatSave.addEventListener('click', saveFormatResult);
 fmtAutocopyCheckbox.addEventListener('change', saveFmtSettings);
 fmtAutosaveCheckbox.addEventListener('change', saveFmtSettings);
-fmtAutoformatCheckbox.addEventListener('change', saveFmtSettings);
 fmtAutosavePath.addEventListener('input', () => {
   saveFmtSettings();
   updateFmtPathSuggestions(fmtAutosavePath.value);
@@ -256,12 +254,10 @@ async function init() {
   const fmtItems = await chrome.storage.sync.get({
     fmtAutoCopy: false,
     fmtAutoSave: false,
-    fmtAutoFormat: false,
     fmtAutoSavePath: '',
   });
   fmtAutocopyCheckbox.checked = fmtItems.fmtAutoCopy;
   fmtAutosaveCheckbox.checked = fmtItems.fmtAutoSave;
-  fmtAutoformatCheckbox.checked = fmtItems.fmtAutoFormat;
   fmtAutosavePath.value = fmtItems.fmtAutoSavePath;
 
   // Pre-fill URL from current tab
@@ -351,6 +347,18 @@ async function init() {
     if (fmtStored[`format:prompt:${currentTabId}`]) {
       formatPrompt.value = fmtStored[`format:prompt:${currentTabId}`];
     }
+    // If no per-tab prompt, try textkit backend
+    if (!formatPrompt.value.trim()) {
+      try {
+        const host = textkitHostInput.value.trim() || 'localhost';
+        const port = parseInt(textkitPortInput.value, 10) || 8765;
+        const resp = await _popupFetch(`http://${host}:${port}/prompts/format`);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.template) formatPrompt.value = data.template;
+        }
+      } catch {}
+    }
     // Format button enabled if transcript has text
     if (resultEl.value.trim()) {
       formatBtn.disabled = false;
@@ -405,7 +413,6 @@ function saveFmtSettings() {
   chrome.storage.sync.set({
     fmtAutoCopy: fmtAutocopyCheckbox.checked,
     fmtAutoSave: fmtAutosaveCheckbox.checked,
-    fmtAutoFormat: fmtAutoformatCheckbox.checked,
     fmtAutoSavePath: fmtAutosavePath.value.trim(),
   });
 }

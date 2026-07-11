@@ -116,7 +116,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.32")
+app = FastAPI(title="YT2TXT", version="0.0.33")
 
 
 # ── Config (cached) ────────────────────────────────────────────────

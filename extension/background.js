@@ -633,7 +633,7 @@ async function handleSaveTranslation(msg) {
 async function handleFormatStart(msg) {
   const { tabId, text, prompt, host, port } = msg;
   if (!tabId || !text) return { ok: false, error: 'Missing tabId or text' };
-  const fmtPrompt = prompt || 'Reformat the following text preserving all meaning. Fix punctuation, capitalization, and structure.';
+  const fmtPrompt = prompt || 'Reformat the following text preserving all meaning. Fix punctuation, capitalization, paragraph breaks, and overall structure.';
 
   // Abort any in-flight formatting for this tab
   handleFormatStop(tabId);
