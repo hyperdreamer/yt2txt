@@ -108,7 +108,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="0.0.11")
+app = FastAPI(title="YT2TXT", version="0.0.12")
 
 
 # ── Config (cached) ────────────────────────────────────────────────
@@ -700,7 +700,10 @@ async def _extract_video_id(url: str) -> str:
 
 
 def _cache_get(video_id: str, ttl_days: int) -> dict | None:
-    """Return a cached transcript if present and within TTL, else None."""
+    """Return a cached transcript if present and within TTL, else None.
+
+    Expired rows are deleted immediately (not just ignored).
+    """
     conn = _get_cache_db()
     try:
         cur = conn.execute(
@@ -719,14 +722,42 @@ def _cache_get(video_id: str, ttl_days: int) -> dict | None:
     try:
         created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
     except ValueError:
+        # Corrupt timestamp — delete and treat as miss
+        _cache_prune_video(video_id)
         return None
     now = datetime.now(timezone.utc)
     if created_dt.tzinfo is None:
         created_dt = created_dt.replace(tzinfo=timezone.utc)
     if created_dt + timedelta(days=ttl_days) < now:
+        _cache_prune_video(video_id)
         return None
 
     return {"text": text, "source": source}
+
+
+def _cache_prune_video(video_id: str) -> None:
+    """Delete a single cache entry by video_id."""
+    conn = _get_cache_db()
+    try:
+        conn.execute("DELETE FROM transcript_cache WHERE video_id = ?", (video_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _cache_prune_expired(ttl_days: int) -> int:
+    """Delete all expired cache rows. Returns the number of rows removed."""
+    conn = _get_cache_db()
+    try:
+        cur = conn.execute(
+            "DELETE FROM transcript_cache "
+            "WHERE datetime(created_at, '+' || ? || ' days') < datetime('now')",
+            (ttl_days,),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
 
 
 def _cache_put(
@@ -871,6 +902,40 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
             "model": model,
             "error": None,
         }
+
+
+# ── Startup cleanup ────────────────────────────────────────────
+
+CACHE_CLEANUP_HOUR = 20  # 8 PM local time
+
+
+async def _daily_cache_cleanup(ttl_days: int) -> None:
+    """Run cache expiry cleanup once per day at CACHE_CLEANUP_HOUR (8 PM)."""
+    while True:
+        now = datetime.now()
+        # Calculate seconds until the next 8 PM
+        next_run = now.replace(hour=CACHE_CLEANUP_HOUR, minute=0, second=0, microsecond=0)
+        if now >= next_run:
+            next_run += timedelta(days=1)
+        delay = (next_run - now).total_seconds()
+        _debug("cache", f"Next daily cleanup at {next_run.strftime('%Y-%m-%d %H:%M:%S')} ({delay:.0f}s)")
+        await asyncio.sleep(delay)
+
+        removed = _cache_prune_expired(ttl_days)
+        if removed:
+            _debug("cache", f"Daily cleanup: removed {removed} expired cache row(s)")
+
+
+@app.on_event("startup")
+async def _startup_cleanup() -> None:
+    """Prune expired cache rows on every server start, then schedule daily cleanup."""
+    config = load_config()
+    if not config.cache_enabled:
+        return
+    removed = _cache_prune_expired(config.cache_ttl_days)
+    if removed:
+        _debug("cache", f"Startup cleanup: removed {removed} expired cache row(s)")
+    asyncio.create_task(_daily_cache_cleanup(config.cache_ttl_days))
 
 
 # ── Run ─────────────────────────────────────────────────────────
