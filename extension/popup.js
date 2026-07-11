@@ -196,6 +196,7 @@ async function init() {
   // transcript populates the textarea instead of being blocked.
   if (newTabId !== currentTabId) {
     userEditedResult = false;
+    tlUserEdited = false;
     formatRetryRow.classList.add('hidden');
   }
   currentTabId = newTabId;

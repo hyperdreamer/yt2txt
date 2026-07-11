@@ -116,6 +116,7 @@ app = FastAPI(title="YT2TXT", version="1.0.0")
 _config_cache: AppConfig | None = None
 _config_cache_ts: float = 0.0
 _config_lock = asyncio.Lock()
+_debug_enabled: bool = False
 
 
 async def get_config() -> AppConfig:
@@ -130,6 +131,8 @@ async def get_config() -> AppConfig:
             return _config_cache
         _config_cache = load_config()
         _config_cache_ts = time.monotonic()
+        global _debug_enabled
+        _debug_enabled = _config_cache.debug
     return _config_cache
 
 
@@ -166,8 +169,7 @@ async def _log_requests(request: Request, call_next: Any) -> Response:
 
 def _debug(tag: str, msg: str) -> None:
     """Print a timestamped debug message when debug mode is enabled."""
-    config = load_config()
-    if not config.debug:
+    if not _debug_enabled:
         return
     from datetime import datetime, timezone
 
