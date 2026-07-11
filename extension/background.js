@@ -503,8 +503,21 @@ async function handleTranslateStart(msg) {
     try {
       const key = `translatePrompt:${language}`;
       const stored = await chrome.storage.local.get(key);
+
+      // Resolve prompt: textkit backend → local storage → undefined
+      let prompt = stored[key] || '';
+      if (!prompt) {
+        try {
+          const promptUrl = await getTextkitEndpoint(`/prompts/translate?language=${encodeURIComponent(language)}`);
+          const resp = await _fetchWithShortTimeout(promptUrl);
+          if (resp.ok) {
+            const data = await resp.json();
+            prompt = data.template || '';
+          }
+        } catch {}
+      }
       // "Original" with no custom prompt → pass through unchanged
-      if (language === 'original' && !stored[key]) {
+      if (language === 'original' && !prompt) {
         const translated = text;
         await chrome.storage.local.set({
           [`tl2Result:${tabId}`]: { text: translated, sourceUrl: msg.sourceUrl || '', language },
@@ -539,7 +552,7 @@ async function handleTranslateStart(msg) {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, language, prompt: stored[key] || undefined }),
+        body: JSON.stringify({ text, language, prompt: prompt || undefined }),
         signal: controller.signal,
       });
       const payload = await response.json().catch(() => ({}));
@@ -1054,13 +1067,12 @@ async function _fetchWithShortTimeout(url) {
   }
 }
 
-async function autoFormatIfEnabled(tabId, text, host, port) {
-  // Try to get format prompt from textkit backend, fall back to local, then default
+// ── Shared prompt resolution ──────────────────────────────────
+async function resolveFormatPrompt() {
   let formatPrompt = '';
   try {
-    const tkHost = host || DEFAULT_HOST;
-    const tkPort = port || DEFAULT_TEXTKIT_PORT;
-    const resp = await _fetchWithShortTimeout(`http://${tkHost}:${tkPort}/prompts/format`);
+    const promptUrl = await getTextkitEndpoint('/prompts/format');
+    const resp = await _fetchWithShortTimeout(promptUrl);
     if (resp.ok) {
       const data = await resp.json();
       formatPrompt = data.template || '';
@@ -1070,10 +1082,14 @@ async function autoFormatIfEnabled(tabId, text, host, port) {
     const stored = await chrome.storage.local.get('formatPrompt');
     formatPrompt = stored.formatPrompt || '';
   }
-  // Default format prompt if nothing configured
   if (!formatPrompt || !formatPrompt.trim()) {
     formatPrompt = 'Reformat the following text preserving all meaning. Fix punctuation, capitalization, paragraph breaks, and overall structure.';
   }
+  return formatPrompt.trim();
+}
+
+async function autoFormatIfEnabled(tabId, text, host, port) {
+  const formatPrompt = await resolveFormatPrompt();
   // Fall back to sync storage if caller didn't provide host/port
   if (!host || port === undefined) {
     const backend = await chrome.storage.sync.get({
@@ -1097,23 +1113,7 @@ async function handleFormatRetry(msg) {
   const { tabId, text } = msg;
   if (!tabId || !text) return { ok: false, error: 'Missing tabId or text.' };
 
-  // Resolve format prompt (same chain as autoFormatIfEnabled)
-  let formatPrompt = '';
-  try {
-    const promptUrl = await getTextkitEndpoint('/prompts/format');
-    const resp = await _fetchWithShortTimeout(promptUrl);
-    if (resp.ok) {
-      const data = await resp.json();
-      formatPrompt = data.template || '';
-    }
-  } catch {}
-  if (!formatPrompt) {
-    const stored = await chrome.storage.local.get('formatPrompt');
-    formatPrompt = stored.formatPrompt || '';
-  }
-  if (!formatPrompt || !formatPrompt.trim()) {
-    formatPrompt = 'Reformat the following text preserving all meaning. Fix punctuation, capitalization, paragraph breaks, and overall structure.';
-  }
+  const formatPrompt = await resolveFormatPrompt();
 
   const items = await chrome.storage.sync.get({
     textkitHost: DEFAULT_HOST,
