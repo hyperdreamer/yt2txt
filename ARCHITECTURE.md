@@ -377,20 +377,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 ```
 handleStart() completes successfully
   │
-  ├─→ [if yt2txtAutoTranslate] autoTranslate(tabId, transcriptText)
-  │     Reads tl2Language:{tabId} from local storage
-  │     If language is "original" → skip (TextKit would pass through too)
-  │     Calls TextKit /translate (TextKit resolves the prompt internally)
-  │     On success → stores tl2Result:{tabId}, broadcasts translation:update
-  │     Then triggers auto-copy/auto-save/auto-format for translation (see 5.2)
-  │
   └─→ autoFormatIfEnabled(tab.id, transcriptText)
         Calls TextKit /format (TextKit resolves the prompt internally)
         On success → stores fmtResult:{tabId}, broadcasts format:update
-        On failure → broadcasts format:update with error
+          └─→ auto-translate is triggered from format completion (see 5.2)
+        On failure → broadcasts format:update with error (no translate)
 ```
 
-### 5.2 Trigger: Translation completes
+### 5.3 Trigger: Translation completes
 
 ```
 handleTranslateStart() completes successfully (translated text is non-empty)
@@ -407,7 +401,7 @@ handleTranslateStart() completes successfully (translated text is non-empty)
         Same as above — calls TextKit /format
 ```
 
-### 5.3 Trigger: Format completes
+### 5.2 Trigger: Format completes
 
 ```
 handleFormatStart() completes successfully (formatted text is non-empty)
@@ -416,27 +410,31 @@ handleFormatStart() completes successfully (formatted text is non-empty)
   │     Uses offscreen document pattern
   │     Shows notification
   │
-  └─→ [if fmtAutoSave AND fmtAutoSavePath] handleSaveTranslation({text, path})
-        Calls TextKit /save
-        Shows notification on success/failure
+  ├─→ [if fmtAutoSave AND fmtAutoSavePath] handleSaveTranslation({text, path})
+  │     Calls TextKit /save
+  │     Shows notification on success/failure
+  │
+  └─→ [if yt2txtAutoTranslate] autoTranslate(tabId, formattedText)
+        Reads tl2Language:{tabId} from local storage
+        If language is "original" → skip (TextKit would pass through too)
+        Calls TextKit /translate (TextKit resolves the prompt internally)
+        On success → stores tl2Result:{tabId}, broadcasts translation:update
+          └─→ triggers auto-copy/auto-save/auto-format for translation (see 5.3)
 ```
+
+**Manual format also triggers auto-translate** — the same `autoTranslate()` call fires whether format was triggered automatically (from transcript completion) or manually (user clicked Format button).
 
 ### 5.4 Cascade scenario
 
 ```
 Transcript completes
-  → auto-translate enabled, language=Chinese
-    → Translation completes → auto-format fires
-      → Format completes → auto-copy + auto-save fire
-
-AND (in parallel):
-
-Transcript completes
-  → auto-format fires immediately
+  → auto-format fires
     → Format completes → auto-copy + auto-save fire
+      → auto-translate fires (if enabled, formatted text)
+        → Translation completes → auto-format fires again + auto-copy + auto-save
 ```
 
-**Important**: Auto-format always fires after transcript extraction (unconditionally). If auto-translate is also enabled, format will fire twice — once with transcript text, once with translated text. The second run replaces the first. This is expected behavior.
+**Important**: Auto-format always fires after transcript extraction (unconditionally). Translation only fires after format (raw or manual) when `yt2txtAutoTranslate` is enabled. When translation completes, auto-format fires again — the second run replaces the first fmtResult. This is expected behavior.
 
 ### 5.5 Auto-format helper
 
@@ -696,7 +694,7 @@ popup.js init()
 |----------|--------|-----------|
 | Prompt ownership | Delegated entirely to TextKit (its Prompt tab + `PUT /prompts/{name}`) | Single source of truth. yt2txt popup stays focused on the read/write surface (text, language, auto-copy, auto-save, save path). |
 | Format source default | "Transcript" | Primary workflow: get transcript → clean it up. Translation is secondary. |
-| Auto-format chain | Independent triggers (not chained) | Transcript→Format and Transcript→Translate→Format are separate. Both can fire; the last one wins for fmtResult. |
+|| Auto-format chain | Sequential: Transcript → Format → Translate → Format | Primary workflow: transcribe → clean → translate → clean translation. Both automatic and manual format trigger auto-translate. |
 | Save message type | Reuse `save:translation` for both | TextKit does this — the `/save` endpoint is the same regardless of what text is being saved |
 | Backend discovery | Auto-fill textkitHost from yt2txtHost if empty | Common case: both backends on same machine, different ports |
 | Notifications | Use `chrome.notifications` for auto-copy/auto-save | User needs feedback when auto-actions fire while popup is closed |
