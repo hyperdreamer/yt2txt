@@ -28,7 +28,6 @@ const formatRetryStatus = document.getElementById('format-retry-status');
 const copyBtn = document.getElementById('copy');
 const downloadBtn = document.getElementById('download');
 // ── Format panel elements ─────────────────────────────────────
-const formatPrompt = document.getElementById('format-prompt');
 const formatBtn = document.getElementById('format-btn');
 const formatStatusBar = document.getElementById('format-status-bar');
 const formatResult = document.getElementById('format-result');
@@ -44,7 +43,6 @@ const forceCheckbox = document.getElementById('force');
 
 // ── Translation panel elements ────────────────────────────────
 const tl2Language = document.getElementById('tl2-language');
-const translatePrompt = document.getElementById('translate-prompt');
 const tl2StatusBar = document.getElementById('tl2-status-bar');
 const tl2Result = document.getElementById('tl2-result');
 const tl2Translate = document.getElementById('tl2-translate');
@@ -116,7 +114,6 @@ downloadBtn.addEventListener('click', downloadText);
 // Format panel
 formatBtn.addEventListener('click', doFormat);
 formatCopy.addEventListener('click', () => copyResult(formatResult, formatCopy));
-formatPrompt.addEventListener('input', () => {});
 formatSave.addEventListener('click', saveFormatResult);
 fmtAutocopyCheckbox.addEventListener('change', saveFmtSettings);
 fmtAutosaveCheckbox.addEventListener('change', saveFmtSettings);
@@ -140,7 +137,6 @@ tl2Download.addEventListener('click', () => downloadAsFile(tl2Result.value.trim(
 tl2Save.addEventListener('click', saveTranslation);
 tl2Language.addEventListener('change', () => {
   saveTl2Language();
-  loadTranslatePromptForLanguage();
 });
 tl2AutocopyCheckbox.addEventListener('change', saveTl2Settings);
 tl2AutosaveCheckbox.addEventListener('change', saveTl2Settings);
@@ -149,7 +145,6 @@ tl2AutosavePath.addEventListener('input', () => {
   saveTl2Settings();
   updatePathSuggestions(tl2AutosavePath.value);
 });
-translatePrompt.addEventListener('input', saveTranslatePrompt);
 
 // TextKit backend
 textkitHostInput.addEventListener('change', saveTextkitBackend);
@@ -294,22 +289,8 @@ async function init() {
     }
   }
 
-  // Load translation prompt for current language
-  await loadTranslatePromptForLanguage();
   loadPathSuggestions();
 
-  // Load format prompt from textkit backend if no per-tab prompt set
-  if (currentTabId && !formatPrompt.value.trim()) {
-    try {
-      const host = textkitHostInput.value.trim() || 'localhost';
-      const port = parseInt(textkitPortInput.value, 10) || 8765;
-      const resp = await _popupFetch(`http://${host}:${port}/prompts/format`);
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.template) formatPrompt.value = data.template;
-      }
-    } catch {}
-  }
   // Format button enabled if transcript has text
   if (resultEl.value.trim()) {
     formatBtn.disabled = false;
@@ -345,11 +326,6 @@ function saveTl2Settings() {
     tl2AutoSavePath: tl2AutosavePath.value.trim(),
     yt2txtAutoTranslate: tl2AutotranslateCheckbox.checked,
   });
-}
-
-function saveTranslatePrompt() {
-  const lang = tl2Language.value;
-  chrome.storage.local.set({ [`translatePrompt:${lang}`]: translatePrompt.value });
 }
 
 function saveTl2Language() {
@@ -411,14 +387,15 @@ function updateFmtPathSuggestions(current) {
 }
 
 // ── Lightweight TextKit fetches (popup → backend) ─────────────────
-// These prompt / path fetches intentionally call fetch() directly from
-// the popup instead of routing through the background service worker.
+// These path-autocomplete fetches intentionally call fetch() directly
+// from the popup instead of routing through the background service
+// worker.
 // Rationale:
 //   - These are low-stakes read-only config fetches, not long-running
 //     operations like transcription, translation, or formatting.
 //   - Route-through-SW would add message-passing latency, which is
 //     noticeable for interactive UX (path autocomplete with debounce).
-//   - Failures are non-critical: the popup falls back to local storage.
+//   - Failures are non-critical: the popup keeps existing suggestions.
 //   - A short (10 s) timeout prevents them from blocking the UI.
 async function _popupFetch(url) {
   const ctrl = new AbortController();
@@ -428,24 +405,6 @@ async function _popupFetch(url) {
   } finally {
     clearTimeout(id);
   }
-}
-
-async function loadTranslatePromptForLanguage() {
-  const lang = tl2Language.value;
-  // Try textkit backend first (source of truth for prompts)
-  try {
-    const host = textkitHostInput.value.trim() || 'localhost';
-    const port = parseInt(textkitPortInput.value, 10) || 8765;
-    const resp = await _popupFetch(`http://${host}:${port}/prompts/translate?language=${encodeURIComponent(lang)}`);
-    if (resp.ok) {
-      const data = await resp.json();
-      translatePrompt.value = data.template || '';
-      return;
-    }
-  } catch {}
-  // Fallback to local storage
-  const stored = await chrome.storage.local.get([`translatePrompt:${lang}`]);
-  translatePrompt.value = stored[`translatePrompt:${lang}`] || '';
 }
 
 // ── Path autocomplete (via textkit backend) ────────────────────
@@ -607,7 +566,6 @@ async function doFormat() {
       type: 'popup:format-start',
       tabId: currentTabId,
       text,
-      prompt: formatPrompt.value.trim(),
     });
     if (!response?.ok) {
       setFormatStatus(response?.error || 'Format failed.');

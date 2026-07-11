@@ -31,7 +31,7 @@ wildcard does not expand the attack surface beyond the local machine.
 ### Message-passing architecture
 - The popup NEVER calls fetch() directly for transcript/translation/format — it always delegates to the background service worker via chrome.runtime.sendMessage.
 - The background handles all backend API calls because the popup's JS context is destroyed on close, killing in-flight fetches.
-- Lightweight config fetches (prompts, path autocomplete) use direct fetch from popup with short timeouts.
+- Lightweight config fetches (path autocomplete) use direct fetch from popup with short timeouts.
 - Popup sends `{ type: 'popup:get-state' }` on init to sync state from background.
 - Popup sends `{ type: 'popup:start' }` to begin transcript extraction.
 - Popup sends `{ type: 'translate:start' }` to begin translation.
@@ -119,7 +119,6 @@ cache:
 
 ### Translation tab
 - Language selector (Original, Chinese, English, Japanese, Korean, French, German, Spanish).
-- Collapsible translation prompt textarea (per-language, fetched from TextKit backend with local-storage fallback).
 - Status bar and result textarea.
 - Auto-copy, Auto-save, Auto-translate checkboxes.
 - Save path input with TextKit backend path autocomplete.
@@ -128,7 +127,7 @@ cache:
 
 ### Format flow
 - Auto-format fires from background after transcript extraction and after translation.
-- Format prompt fetched from TextKit `/prompts/format`, falls back to local storage, then a sensible default.
+- Format and translation prompts are owned by TextKit (Prompt tab + `PUT /prompts/{name}`); yt2txt sends no `prompt` field and TextKit resolves the prompt via its own chain.
 - Formatted text replaces the transcript cache (`transcript:${tabId}`) preserving the URL for tab-reopen validation.
 - Raw transcript cached separately (`transcript_raw:${tabId}`) for retry on format failure.
 - Format button in Transcript tab is always visible for manual fail-safe re-formatting.

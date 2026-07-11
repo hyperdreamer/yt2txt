@@ -97,7 +97,6 @@ function getState(tabId) {
       format: {
         sourceText: '',
         resultText: '',
-        prompt: '',
         active: false,
         status: '',
         error: '',
@@ -107,7 +106,6 @@ function getState(tabId) {
       translate: {
         sourceText: '',
         resultText: '',
-        prompt: '',
         targetLanguage: 'zh',
         active: false,
         status: '',
@@ -190,7 +188,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       `tl2Translating:${tabId}`,
       `fmtFormatting:${tabId}`,
       `translate:language:${tabId}`,
-      `translate:prompt:${tabId}`,
     ])
     .catch(() => {});
 });
@@ -487,30 +484,14 @@ async function handleTranslateStart(msg) {
       .catch(() => {});
 
     try {
-      const key = `translatePrompt:${language}`;
-      const stored = await chrome.storage.local.get(key);
-
-      // Resolve prompt: textkit backend → local storage → undefined
-      let prompt = stored[key] || '';
-      if (!prompt) {
-        try {
-          const promptUrl = await getTextkitEndpoint(`/prompts/translate?language=${encodeURIComponent(language)}`);
-          const resp = await _fetchWithShortTimeout(promptUrl);
-          if (resp.ok) {
-            const data = await resp.json();
-            prompt = data.template || '';
-          }
-        } catch {}
-      }
-      // "Original" with no custom prompt → pass through unchanged
-      if (language === 'original' && !prompt) {
-        const translated = text;
+      // "Original" → pass through unchanged (no API call).
+      if (language === 'original') {
         chrome.runtime
-          .sendMessage({ type: 'translation:update', tabId, text: translated, sourceUrl: msg.sourceUrl })
+          .sendMessage({ type: 'translation:update', tabId, text, sourceUrl: msg.sourceUrl })
           .catch(() => {});
-        if (translated) autoCopyIfEnabled(translated);
-        if (translated) autoSaveIfEnabled(translated);
-        if (translated) autoFormatIfEnabled(tabId, translated, host, port);
+        if (text) autoCopyIfEnabled(text);
+        if (text) autoSaveIfEnabled(text);
+        if (text) autoFormatIfEnabled(tabId, text, host, port);
         return { ok: true };
       }
 
@@ -532,7 +513,7 @@ async function handleTranslateStart(msg) {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, language, prompt: prompt || undefined }),
+        body: JSON.stringify({ text, language }),
         signal: controller.signal,
       });
       const payload = await response.json().catch(() => ({}));
@@ -606,9 +587,8 @@ async function handleSaveTranslation(msg) {
 
 // ── Handle format start ────────────────────────────────────────
 async function handleFormatStart(msg) {
-  const { tabId, text, prompt, host, port } = msg;
+  const { tabId, text, host, port } = msg;
   if (!tabId || !text) return { ok: false, error: 'Missing tabId or text' };
-  const fmtPrompt = prompt || 'Reformat the following text preserving all meaning. Fix punctuation, capitalization, paragraph breaks, and overall structure.';
 
   // Abort any in-flight formatting for this tab
   handleFormatStop(tabId);
@@ -641,7 +621,7 @@ async function handleFormatStart(msg) {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, prompt: fmtPrompt }),
+        body: JSON.stringify({ text }),
         signal: controller.signal,
       });
       const payload = await response.json().catch(() => ({}));
@@ -697,7 +677,7 @@ function handleFormatStop(tabId) {
 
 // ── Unified Format handler (TextKit /format) ───────────────────
 async function handlePopupFormatStart(msg) {
-  const { tabId, text, prompt } = msg;
+  const { tabId, text } = msg;
   if (!tabId || !text) {
     return { ok: false, error: 'Missing tabId or text.' };
   }
@@ -721,7 +701,6 @@ async function handlePopupFormatStart(msg) {
     startKeepAlive();
 
     state.format.sourceText = text;
-    state.format.prompt = prompt || '';
     state.format.active = true;
     state.format.status = 'Formatting...';
     state.format.error = '';
@@ -732,7 +711,7 @@ async function handlePopupFormatStart(msg) {
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, prompt: prompt || '' }),
+      body: JSON.stringify({ text }),
       signal: controller.signal,
     });
     const payload = await response.json().catch(() => ({}));
@@ -798,7 +777,7 @@ function handlePopupFormatStop(tabId) {
 
 // ── Unified Translate handler (TextKit /translate) ──────────────
 async function handlePopupTranslateStart(msg) {
-  const { tabId, text, targetLanguage, prompt } = msg;
+  const { tabId, text, targetLanguage } = msg;
   if (!tabId || !text) {
     return { ok: false, error: 'Missing tabId or text.' };
   }
@@ -823,7 +802,6 @@ async function handlePopupTranslateStart(msg) {
 
     state.translate.sourceText = text;
     state.translate.targetLanguage = targetLanguage || 'zh';
-    state.translate.prompt = prompt || '';
     state.translate.active = true;
     state.translate.status = `Translating to ${state.translate.targetLanguage}...`;
     state.translate.error = '';
@@ -837,7 +815,6 @@ async function handlePopupTranslateStart(msg) {
       body: JSON.stringify({
         text,
         language: targetLanguage || 'zh',
-        prompt: prompt || undefined,
       }),
       signal: controller.signal,
     });
@@ -1016,29 +993,7 @@ async function _fetchWithShortTimeout(url) {
   }
 }
 
-// ── Shared prompt resolution ──────────────────────────────────
-async function resolveFormatPrompt() {
-  let formatPrompt = '';
-  try {
-    const promptUrl = await getTextkitEndpoint('/prompts/format');
-    const resp = await _fetchWithShortTimeout(promptUrl);
-    if (resp.ok) {
-      const data = await resp.json();
-      formatPrompt = data.template || '';
-    }
-  } catch {}
-  if (!formatPrompt) {
-    const stored = await chrome.storage.local.get('formatPrompt');
-    formatPrompt = stored.formatPrompt || '';
-  }
-  if (!formatPrompt || !formatPrompt.trim()) {
-    formatPrompt = 'Reformat the following text preserving all meaning. Fix punctuation, capitalization, paragraph breaks, and overall structure.';
-  }
-  return formatPrompt.trim();
-}
-
 async function autoFormatIfEnabled(tabId, text, host, port) {
-  const formatPrompt = await resolveFormatPrompt();
   // Fall back to sync storage if caller didn't provide host/port
   if (!host || port === undefined) {
     const backend = await chrome.storage.sync.get({
@@ -1051,7 +1006,6 @@ async function autoFormatIfEnabled(tabId, text, host, port) {
   handleFormatStart({
     tabId,
     text,
-    prompt: formatPrompt.trim(),
     host,
     port,
   }).catch((e) => console.error('autoFormatIfEnabled failed:', e));
@@ -1062,8 +1016,6 @@ async function handleFormatRetry(msg) {
   const { tabId, text } = msg;
   if (!tabId || !text) return { ok: false, error: 'Missing tabId or text.' };
 
-  const formatPrompt = await resolveFormatPrompt();
-
   const items = await chrome.storage.sync.get({
     textkitHost: DEFAULT_HOST,
     textkitPort: DEFAULT_TEXTKIT_PORT,
@@ -1072,7 +1024,6 @@ async function handleFormatRetry(msg) {
   return handleFormatStart({
     tabId,
     text,
-    prompt: formatPrompt.trim(),
     host: items.textkitHost,
     port: items.textkitPort,
   });
@@ -1089,12 +1040,8 @@ async function autoTranslate(tabId, text, sourceUrl) {
   const tl2LangKey = `tl2Language:${tabId}`;
   const tl2Lang = await chrome.storage.local.get(tl2LangKey);
   const language = tl2Lang[tl2LangKey] || 'original';
-  // "Original" with no custom prompt → skip (nothing to do)
-  if (language === 'original') {
-    const promptKey = 'translatePrompt:original';
-    const promptStored = await chrome.storage.local.get(promptKey);
-    if (!promptStored[promptKey]) return;
-  }
+  // "Original" → no translation needed (TextKit's prompt chain handles nothing-to-do).
+  if (language === 'original') return;
 
   // Pull TextKit host/port from sync storage for the auto path
   const backend = await chrome.storage.sync.get({

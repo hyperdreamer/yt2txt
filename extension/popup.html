@@ -231,8 +231,7 @@
     }
 
     /* Format / Translation textareas (shared) */
-    #format-prompt, #format-result,
-    #tl-source, #tl-prompt, #tl-result {
+    #format-result, #tl-result {
       width: 100%;
       padding: 8px;
       border: 1px solid #334155;
@@ -245,15 +244,11 @@
       box-sizing: border-box;
       margin-bottom: 8px;
     }
-    #format-prompt:focus, #format-result:focus,
-    #tl-source:focus, #tl-prompt:focus, #tl-result:focus {
+    #format-result:focus, #tl-result:focus {
       border-color: #38bdf8;
       outline: none;
     }
-    #format-prompt  { min-height: 60px; resize: vertical; }
     #format-result  { height: 120px; resize: vertical; }
-    #tl-source      { height: 100px; resize: vertical; }
-    #tl-prompt      { min-height: 60px; resize: vertical; }
     #tl-result      { height: 120px; resize: vertical; }
     #format-panel .collapsible { margin-bottom: 8px; }
     #translate-panel .collapsible { margin-bottom: 8px; }
@@ -334,11 +329,6 @@
       }
       #result:focus, #tl2-result:focus { border-color: #0284c7; }
 
-      #translate-prompt {
-        background: #ffffff; color: #0f172a; border-color: #cbd5e1;
-      }
-      #translate-prompt:focus { border-color: #0284c7; }
-
       .save-path-label { color: #64748b; }
       .save-path-label input {
         border-color: #cbd5e1; background: #ffffff; color: #0f172a;
@@ -347,12 +337,10 @@
 
       .force-label { color: #64748b; }
 
-      #format-prompt, #format-result,
-      #tl-source, #tl-prompt, #tl-result {
+      #format-result, #tl-result {
         border-color: #cbd5e1; background: #ffffff; color: #0f172a;
       }
-      #format-prompt:focus, #format-result:focus,
-      #tl-source:focus, #tl-prompt:focus, #tl-result:focus {
+      #format-result:focus, #tl-result:focus {
         border-color: #0284c7;
       }
       .panel-header h1 { color: #0284c7; }
@@ -363,7 +351,7 @@
 <body>
   <div class="header">
     <h1>YT2TXT</h1>
-    <span class="version">v0.0.38</span>
+    <span class="version">v0.0.40</span>
     <button id="settings-gear" class="gear-btn" title="Backend Settings">⚙</button>
   </div>
 
@@ -413,10 +401,6 @@
     <div class="panel-header">
       <h1>Format Transcript</h1>
     </div>
-    <details class="collapsible">
-      <summary>Formatting Instructions (optional)</summary>
-      <textarea id="format-prompt" placeholder="E.g.: Format this transcript into well-structured paragraphs..."></textarea>
-    </details>
     <div id="format-status-bar" class="status-bar">Ready</div>
     <label class="panel-label" for="format-result">Formatted Result</label>
     <textarea id="format-result" readonly placeholder="Formatted text will appear here..."></textarea>
@@ -452,10 +436,6 @@
         </select>
       </label>
     </div>
-    <details class="collapsible">
-      <summary>Translation Prompt</summary>
-      <textarea id="translate-prompt" placeholder="Custom AI prompt (per language). E.g.: Translate to formal academic Chinese." style="width:100%;min-height:100px;box-sizing:border-box;padding:6px;border:1px solid #334155;border-radius:4px;background:#1e293b;color:#e2e8f0;font-size:12px;resize:vertical;font-family:inherit;"></textarea>
-    </details>
     <div id="tl2-status-bar" class="status-bar">Ready</div>
     <textarea id="tl2-result" readonly placeholder="Translation will appear here..."></textarea>
     <div class="option-row">

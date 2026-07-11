@@ -8,7 +8,7 @@ A Chrome Manifest V3 extension + FastAPI backend that extracts transcripts from 
 
 **Two-tab UI:**
 - **Transcript tab** — transcript extraction, formatting
-- **Translation tab** — translate transcripts with configurable prompts, auto-copy/auto-save
+- **Translation tab** — translate transcripts with auto-copy/auto-save (prompts managed in TextKit)
 
 ## Prerequisites
 
@@ -75,10 +75,10 @@ The server starts on `http://127.0.0.1:8666` by default.
 ### Translation tab
 
 1. Select a target language
-2. Optionally customize the translation prompt
-3. Click **Translate** — or enable **Auto-translate** to translate automatically after extraction
-4. Enable **Auto-copy** / **Auto-save** for hands-off workflow
-5. When the transcript language matches the target, no API call is made — text passes through directly
+2. Click **Translate** — or enable **Auto-translate** to translate automatically after extraction
+3. Enable **Auto-copy** / **Auto-save** for hands-off workflow
+4. When the transcript language matches the target, no API call is made — text passes through directly
+5. Translation and formatting prompts are managed in the **TextKit** backend (Prompt tab / `PUT /prompts/{name}`)
 
 ### Keyboard shortcut
 

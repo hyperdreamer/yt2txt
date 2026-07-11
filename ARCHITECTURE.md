@@ -34,12 +34,6 @@ popup.html
 │
 ├── #format-panel (NEW)
 │   ├── h1 "Format"
-│   ├── .settings
-│   │   └── label Source > select#fmt-source
-│   │       ├── option "Transcript" (default)
-│   │       └── option "Translation"
-│   ├── .collapsible-section "Prompt"
-│   │   └── textarea#format-prompt (custom format prompt)
 │   ├── #fmt-status-bar
 │   ├── textarea#fmt-result (readonly)
 │   ├── .option-row
@@ -65,8 +59,6 @@ popup.html
 │   │       ├── option "French"
 │   │       ├── option "German"
 │   │       └── option "Spanish"
-│   ├── .collapsible-section "Prompt"
-│   │   └── textarea#translate-prompt (per-language, loaded from TextKit backend)
 │   ├── #tl2-status-bar
 │   ├── textarea#tl2-result (readonly)
 │   ├── .option-row
@@ -86,18 +78,14 @@ popup.html
     └── label "TextKit" Host/Port (NEW, port 8765)
 ```
 
-### Design decision: Prompt placement
+### Design decision: Prompt placement (delegated to TextKit)
 
-**Chosen: Prompts inline in each tab, inside a collapsible `<details>` element.**
+**Chosen: yt2txt does not expose prompt textareas. All prompt management is owned by the TextKit backend** (its Prompt tab, file-backed storage, `PUT /prompts/{name}`).
 
 Rationale:
-- Each prompt is specific to its tab (format prompt lives in Format tab, translation prompt lives in Translation tab). No context-switching needed.
-- Avoids a 4th "Prompt" tab (TextKit has 4 tabs; yt2txt stays at 3).
-- The collapsible `<details>` element keeps the UI clean when prompts aren't being edited, while being always accessible.
-
-The translation prompt is **per-language** — changing the language selector loads the prompt for that language from `chrome.storage.local` (keyed `translatePrompt:${language}`), with the TextKit backend's `/prompts/translate?language=X` as the source of truth.
-
-The format prompt is **global** — stored as a single key `formatPrompt` in `chrome.storage.local`.
+- Avoids a 4th tab and removes duplication — TextKit is already the source of truth.
+- `popup.js` and `background.js` no longer fetch, cache, or pass `prompt` to `/translate` or `/format`; TextKit resolves the prompt via its own chain.
+- The popup stays focused on the read/write surface (transcript, language, auto-copy, auto-save, save path).
 
 ---
 
@@ -123,25 +111,24 @@ User clicks "Translate" in popup
     5. Persist state: tl2Translating:{tabId}=true, tl2Status:{tabId}="Translating to {lang}..."
     6. Clear stale result: remove tl2Result:{tabId}
     7. Broadcast { type: 'tl2:translating', tabId, value: true }
-    8. Handle "original" language with no custom prompt → pass-through (no API call)
-    9. Load per-language prompt from chrome.storage.local (key: translatePrompt:{language})
-    10. Build URL: http://{host}:{port}/translate?_={Date.now()}
-    11. POST { text, language, prompt: stored[key] || undefined }
-    12. On success:
+    8. Handle "original" language → pass-through (no API call, no prompt)
+    9. Build URL: http://{host}:{port}/translate?_={Date.now()}
+    10. POST { text, language }  (TextKit resolves the prompt internally)
+    11. On success:
         - Store tl2Result:{tabId} = payload.text
         - Broadcast { type: 'translation:update', tabId, text }
         - If text: autoCopyIfEnabled(text), autoSaveIfEnabled(text)
         - If text: autoFormatIfEnabled(tabId, text, host, port)
-    13. On abort (user Stop):
+    12. On abort (user Stop):
         - Store tl2Status:{tabId} = "Translation stopped."
         - Return { ok: true }
-    14. On timeout (AbortError + timedOut):
+    13. On timeout (AbortError + timedOut):
         - Store tl2Status:{tabId} = "Translation timed out."
         - Broadcast error
-    15. On fetch error:
+    14. On fetch error:
         - Store tl2Status:{tabId} = error message
         - Broadcast error
-    16. Finally:
+    15. Finally:
         - Clear timeout
         - Remove controller from translateControllers
         - Remove tl2Translating:{tabId}
@@ -167,14 +154,14 @@ User clicks "Format" in popup
     1. Determine source text:
        - fmtSource="Transcript" → resultEl.value (transcript textarea)
        - fmtSource="Translation" → tl2Result.value (translation textarea)
-    2. Validate: source text not empty, currentTabId exists, prompt not empty
+    2. Validate: source text not empty, currentTabId exists
     3. Normalize TextKit backend settings
     4. Update UI: button → "Stop" (danger style), clear result, disable Copy/Save/Download
     5. Fire-and-forget:
-       { type: 'format:start', tabId, text, prompt, host, port }
+       { type: 'format:start', tabId, text, host, port }
 
   → background.js: handleFormatStart(msg)
-    1. Validate: tabId, text, prompt present
+    1. Validate: tabId and text present
     2. Abort any in-flight format for this tab (handleFormatStop)
     3. Create new AbortController → formatControllers.set(tabId, controller)
     4. Start keepAlive
@@ -182,7 +169,7 @@ User clicks "Format" in popup
     6. Clear stale result: remove fmtResult:{tabId}
     7. Broadcast { type: 'fmt:formatting', tabId, value: true }
     8. Build URL: http://{host}:{port}/format?_={Date.now()}
-    9. POST { text, prompt }
+    9. POST { text }  (TextKit resolves the prompt internally)
     10. On success:
         - Store fmtResult:{tabId} = payload.text
         - Broadcast { type: 'format:update', tabId, text }
@@ -303,8 +290,6 @@ Translation/Format progress is stored in `chrome.storage.local` (survives SW res
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `formatPrompt` | string | Global format prompt text |
-| `translatePrompt:${language}` | string | Per-language translation prompt (e.g., `translatePrompt:Chinese`) |
 | `tl2PathHistory` | array | Save path history for autocomplete (max 20 entries) |
 
 ### 3.4 chrome.storage.sync keys (persisted across devices)
@@ -363,7 +348,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 | `popup:get-state` | popup→bg | (none) | `{ok, state, tabId}` | Get current state (existing) |
 | `translate:start` | popup→bg | `{tabId, text, language, host, port}` | `{ok, error?}` | **NEW** Start translation |
 | `translate:stop` | popup→bg | `{tabId}` | `{ok}` | **NEW** Stop translation |
-| `format:start` | popup→bg | `{tabId, text, prompt, host, port}` | `{ok, error?}` | **NEW** Start formatting |
+| `format:start` | popup→bg | `{tabId, text, host, port}` | `{ok, error?}` | **NEW** Start formatting (no `prompt` — TextKit owns it) |
 | `format:stop` | popup→bg | `{tabId}` | `{ok}` | **NEW** Stop formatting |
 | `save:translation` | popup→bg | `{text, path}` | `{ok, path?, error?}` | **NEW** Save text via TextKit `/save` |
 
@@ -394,14 +379,13 @@ handleStart() completes successfully
   │
   ├─→ [if yt2txtAutoTranslate] autoTranslate(tabId, transcriptText)
   │     Reads tl2Language:{tabId} from local storage
-  │     If language is "original" with no custom prompt → skip
-  │     Calls TextKit /translate
+  │     If language is "original" → skip (TextKit would pass through too)
+  │     Calls TextKit /translate (TextKit resolves the prompt internally)
   │     On success → stores tl2Result:{tabId}, broadcasts translation:update
   │     Then triggers auto-copy/auto-save/auto-format for translation (see 5.2)
   │
   └─→ autoFormatIfEnabled(tab.id, transcriptText)
-        Resolves format prompt from textkit → local storage → default
-        Calls TextKit /format
+        Calls TextKit /format (TextKit resolves the prompt internally)
         On success → replaces transcript:{tabId}, broadcasts format:update
         On failure → broadcasts format:update with error
 ```
@@ -458,7 +442,6 @@ Transcript completes
 
 ```javascript
 async function autoFormatIfEnabled(tabId, text, host, port) {
-  const formatPrompt = await resolveFormatPrompt();
   // Fall back to sync storage if caller didn't provide host/port
   if (!host || port === undefined) {
     const backend = await chrome.storage.sync.get({
@@ -468,9 +451,9 @@ async function autoFormatIfEnabled(tabId, text, host, port) {
     host = backend.textkitHost;
     port = backend.textkitPort;
   }
+  // No `prompt` — TextKit resolves the format prompt via its own chain.
   handleFormatStart({
     tabId, text,
-    prompt: formatPrompt,
     host, port,
   }).catch(() => {});
 }
@@ -499,7 +482,7 @@ fmtAutoSavePath     string   ""          (NEW)
 ### chrome.storage.local (global)
 
 ```
-translatePrompt:${lang}   string   ""          (NEW, one per language)
+(none — prompts live in TextKit, not in chrome.storage)
 ```
 
 ### chrome.storage.local (per-tab, suffixed with `:${tabId}`)
@@ -524,7 +507,7 @@ YT2TXT uses **two distinct backends**:
 | Backend | Default Port | Purpose | Config Keys |
 |---------|-------------|---------|-------------|
 | YT2TXT | 8666 | Transcript extraction (`/transcript`) | `yt2txtHost`, `yt2txtPort` |
-| TextKit | 8765 | Format (`/format`), Translate (`/translate`), Save (`/save`), Prompts (`/prompts/translate`) | `textkitHost`, `textkitPort` |
+| TextKit | 8765 | Format (`/format`), Translate (`/translate`), Save (`/save`), Prompt management (`/prompts/*`) | `textkitHost`, `textkitPort` |
 
 ### Background.js: two cached URL builders
 
@@ -613,7 +596,6 @@ if (!items.textkitHost) {
 ### 8.4 Invalid input
 
 - Empty source text → Format/Translate button is disabled (UI-level guard)
-- Empty prompt → doFormat() returns early with status message "Enter a formatting prompt first."
 - Empty save path → save function returns early with status message "Set a Save path first."
 - Invalid host/port → `normalizeBackendSettings()` throws, caught by caller, shown in status bar
 
@@ -692,15 +674,14 @@ if (!items.textkitHost) {
 - Add `#format-panel` with all Format tab elements
 - Add `#translation-panel` with all Translation tab elements
 - Add TextKit Host/Port inputs
-- Add collapsible prompt sections with `<details>` elements
 - Add tab-switching CSS
 
 ### 9.4 `extension/popup.js` — MODIFY (major additions)
 
 **New element references:**
 - Tab buttons and panel elements
-- All Format tab elements (source selector, prompt textarea, result textarea, buttons, checkboxes, save path)
-- All Translation tab elements (language selector, prompt textarea, result textarea, buttons, checkboxes, save path)
+- All Format tab elements (result textarea, buttons, checkboxes, save path)
+- All Translation tab elements (language selector, result textarea, buttons, checkboxes, save path)
 - TextKit host/port inputs
 
 **New functions:**
@@ -713,8 +694,6 @@ if (!items.textkitHost) {
 - `updateTranslationButtons()` / `updateFormatButtons()`
 - `saveTl2Settings()` / `saveFormatSettings()`
 - `saveTl2Language()`
-- `loadPromptForLanguage()` — fetch from TextKit backend, fallback to local storage
-- `saveTranslatePrompt()` — save to local storage, sync to backend
 - `loadPathSuggestions()` / `updatePathSuggestions()` / `fetchPathSuggestions()`
 - `saveTextkitBackend()` — save TextKit host/port to sync storage
 
@@ -725,7 +704,7 @@ if (!items.textkitHost) {
 - `fmt:formatting` — update format button state
 
 **Modified:**
-- `init()` — load TextKit settings, translation language, format prompt, restore per-tab results
+- `init()` — load TextKit settings, translation language, restore per-tab results
 - `renderState()` — update new tab button states when transcript changes
 - `saveSettings()` — rename to `saveYt2txtSettings()` and add `saveTextkitSettings()`
 
@@ -742,7 +721,6 @@ Clipboard handler using hidden textarea + `execCommand('copy')`. Exact copy from
 The existing yt2txt popup.css (inline in popup.html) uses a dark-first theme with `@media (prefers-color-scheme: light)` overrides. The new tab UI must follow the same style:
 
 - Tab bar: dark background (`#1e293b`), active tab with blue bottom border (`#38bdf8`), inactive tabs gray (`#94a3b8`)
-- Collapsible sections: use `<details>` with styling matching existing `.settings` style
 - Status bars: same pattern as existing `#status-bar` (one per tab: `#status-bar`, `#fmt-status-bar`, `#tl2-status-bar`)
 - Option rows: flex row with checkbox labels, matching existing style
 - Save path inputs: styled like existing `.settings input`
@@ -771,15 +749,11 @@ popup.js init()
        if translating && has result → show result, clear translating flag
        if translating && no result → show "Stop" button
   7. Load format tab state (same pattern):
-     - formatPrompt → fill prompt textarea
      - fmtResult:{tabId} → fill textarea, enable buttons
      - fmtStatus:{tabId} → set status bar
      - fmtFormatting:{tabId} → restore "Stop" button if was formatting
-  8. Load translation prompt for current language:
-     - Try TextKit backend /prompts/translate?language=X
-     - Fallback to translatePrompt:{lang} in local storage
-  9. Load path suggestions from TextKit backend /paths
-  10. Update all button states
+  8. Load path suggestions from TextKit backend /paths
+  9. Update all button states
 ```
 
 ---
@@ -788,11 +762,10 @@ popup.js init()
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Prompt placement | Inline per-tab, collapsible with `<details>` | Keeps 3 tabs, avoids context-switching, each prompt lives with its operation |
+| Prompt ownership | Delegated entirely to TextKit (its Prompt tab + `PUT /prompts/{name}`) | Single source of truth. yt2txt popup stays focused on the read/write surface (text, language, auto-copy, auto-save, save path). |
 | Format source default | "Transcript" | Primary workflow: get transcript → clean it up. Translation is secondary. |
 | Auto-format chain | Independent triggers (not chained) | Transcript→Format and Transcript→Translate→Format are separate. Both can fire; the last one wins for fmtResult. |
 | Save message type | Reuse `save:translation` for both | TextKit does this — the `/save` endpoint is the same regardless of what text is being saved |
-| Prompt scope | Format: global. Translation: per-language. | Format prompt is a reusable template. Translation prompt must vary by target language. |
 | Backend discovery | Auto-fill textkitHost from yt2txtHost if empty | Common case: both backends on same machine, different ports |
 | Notifications | Use `chrome.notifications` for auto-copy/auto-save | User needs feedback when auto-actions fire while popup is closed |
 | Tab order | Transcript → Format → Translation | Matches primary workflow: extract → clean → translate |
