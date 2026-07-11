@@ -318,9 +318,6 @@ async function saveYt2txtSettings() {
   });
 }
 
-// Backward-compatible alias (some scripts/old code may reference it)
-const saveSettings = saveYt2txtSettings;
-
 function saveTextkitBackend() {
   chrome.storage.sync.set({
     textkitHost: textkitHostInput.value.trim() || 'localhost',

@@ -8,8 +8,6 @@ const LOCAL_BACKEND_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 // Map transcript language codes to translation target names.
 // When source == target, no API call is needed — just pass through.
-const LANG_CODES = new Set(['en', 'zh', 'ja', 'ko', 'es', 'fr', 'de', 'ru', 'ar', 'pt', 'hi']);
-
 // ── Backend URL cache (yt2txt) ──────────────────────────────────
 let _yt2txtBaseUrl = null;
 let _yt2txtBaseUrlExpiry = 0;
@@ -170,11 +168,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     .remove([
       `transcript:${tabId}`,
       `transcript_raw:${tabId}`,
-      `status:${tabId}`,
       `tl2Language:${tabId}`,
       `tl2Translating:${tabId}`,
       `fmtResult:${tabId}`,
-      `translate:language:${tabId}`,
       `translate:result:${tabId}`,
     ])
     .catch(() => {});
