@@ -1,20 +1,30 @@
 # YT2TXT — Video to Transcript
 
-A Chrome Manifest V3 extension + FastAPI backend that extracts transcripts from YouTube and any [yt-dlp](https://github.com/yt-dlp/yt-dlp)-supported site.
+Chrome Manifest V3 extension + FastAPI backend that extracts transcripts from YouTube and any [yt-dlp](https://github.com/yt-dlp/yt-dlp)-supported site. Three-tab UI: Transcript → Format → Translation.
 
-**Two paths:**
+**Two paths for extraction:**
 1. **Native subtitles available** → downloaded directly via yt-dlp (fast, free).
-2. **No subtitles** → audio is downloaded and transcribed via OpenAI's `gpt-4o-transcribe` or `gpt-4o-min-transcribe`.
+2. **No subtitles** → audio is downloaded and transcribed via OpenAI-compatible API (`gpt-4o-transcribe` or `gpt-4o-min-transcribe`).
 
-**Transcript cache:** results are cached in SQLite with a configurable TTL (default 30 days). Cache hits skip all yt-dlp and API work for instant responses.
+Transcripts are cached in SQLite — instant return on repeat requests.
+
+## Backends
+
+YT2TXT uses **two backends**:
+
+| Backend | Default Port | Purpose |
+|---------|-------------|---------|
+| **YT2TXT** | `8666` | Transcript extraction, caching |
+| **TextKit** | `8765` | Formatting, translation, save to disk |
 
 ## Prerequisites
 
 - Python 3.10+
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`pip install yt-dlp`)
-- [ffmpeg](https://ffmpeg.org/) (for audio splitting on long videos)
+- ffmpeg (for audio splitting on long videos)
 - Chrome or Chromium browser
-- OpenAI API key (for transcription; free if video has subtitles)
+- OpenAI-compatible API key (for transcription; free if video has subtitles)
+- [TextKit](https://github.com/hyperdreamer/textkit) backend (for Format and Translation tabs)
 
 ## Setup
 
@@ -27,22 +37,21 @@ pip install -r requirements.txt
 
 ### 2. Configuration
 
-Edit `config.yaml` (copy from `config.example.yaml` if needed):
+```bash
+cp config.example.yaml config.yaml
+```
+
+Edit `config.yaml`:
 
 ```yaml
-host: "127.0.0.1"
-port: 8666
-
 ai:
-  model: "gpt-4o-transcribe"     # or gpt-4o-min-transcribe
+  api_key: "$OPENAI_API_KEY"   # or set the OPENAI_API_KEY env var
   api_base: "https://api.openai.com"
-  api_key: "$OPENAI_API_KEY"     # or set the OPENAI_API_KEY env var
+  model: "gpt-4o-transcribe"   # or gpt-4o-min-transcribe
 
 cache:
-  enabled: true                  # SQLite transcript cache
+  enabled: true
   ttl_days: 30
-
-# debug: true                    # Enable debug logging
 ```
 
 Or export the environment variable:
@@ -51,13 +60,15 @@ Or export the environment variable:
 export OPENAI_API_KEY="sk-..."
 ```
 
-### 3. Start the backend
+### 3. Start the backends
 
 ```bash
-python main.py
-```
+# Terminal 1 — YT2TXT backend (port 8666)
+cd backend && python main.py
 
-The server starts on `http://127.0.0.1:8666` by default.
+# Terminal 2 — TextKit backend (port 8765)
+# See textkit repo for setup
+```
 
 ### 4. Load the extension
 
@@ -68,23 +79,40 @@ The server starts on `http://127.0.0.1:8666` by default.
 
 ## Usage
 
-### Three-tab interface
+### Transcript tab
 
-- **Transcript** — paste a URL and click **Get Transcript**. Shows progress (checking subtitles → downloading audio → transcribing). Copy or download the result.
-- **Format** — sends the transcript to TextKit's `/format` endpoint for cleanup/structuring. Supports auto-copy and auto-save with path autocomplete.
-- **Translation** — sends the transcript to TextKit's `/translate` endpoint. Supports auto-copy, auto-save, and auto-translate (chain: transcript → format → translate).
+1. Navigate to a video page (YouTube, Vimeo, etc.)
+2. Click the YT2TXT icon — the current page URL is pre-filled
+3. Optionally check **Force refresh** to bypass cache
+4. Click **Get Transcript**
+5. Copy or download the result
+
+### Format tab
+
+- Click **Format** to clean up the transcript via TextKit
+- Toggle **Auto-copy** / **Auto-save** for automatic handling
+
+### Translation tab
+
+- Select target language from the dropdown
+- Click **Translate** to translate the transcript via TextKit
+- **Auto-translate**: when enabled, translation fires automatically after format completes
+
+### Auto-action chain
+
+```
+Get Transcript → Format (auto) → Translate (auto, if enabled)
+```
+
+All auto-actions show desktop notifications with results. Format and translation results survive popup close and service worker restart.
 
 ### Keyboard shortcut
 
 Press **Ctrl+Shift+T** (Mac: **Cmd+Shift+T**) on any video page to start transcript extraction immediately.
 
-### Force refresh
+### Settings
 
-Check "Force refresh" to bypass the transcript cache and re-fetch from source.
-
-### Backend settings
-
-Click the ⚙ gear icon to configure YT2TXT and TextKit backend host/port.
+Click the ⚙ gear icon to configure both backend addresses. TextKit host auto-fills from YT2TXT host when empty (common single-machine case).
 
 ## Backend endpoints
 
@@ -95,8 +123,8 @@ Returns `{"status": "ok"}`.
 ```json
 {
   "url": "https://www.youtube.com/watch?v=...",
-  "model": "gpt-4o-transcribe",   // optional, defaults to config
-  "force": false                   // optional, bypass cache
+  "model": "gpt-4o-transcribe",  // optional, defaults to config
+  "force": false                  // optional, bypass cache
 }
 ```
 
@@ -104,8 +132,8 @@ Response:
 ```json
 {
   "text": "...transcript...",
-  "source": "subtitles",           // or "transcription" or "cached"
-  "model": "yt-dlp",               // or "gpt-4o-transcribe" or "cached"
+  "source": "subtitles",       // or "transcription"
+  "model": "yt-dlp",           // or "gpt-4o-transcribe", or "cached"
   "error": null
 }
 ```
@@ -113,19 +141,22 @@ Response:
 ## Architecture
 
 ```
-extension/          ← Chrome MV3 extension
-  manifest.json     ← permissions, commands, icons
-  background.js     ← service worker (all API calls, per-tab state)
-  popup.html        ← three-tab popup UI
-  popup.js          ← tab switching, settings, autocomplete
-  icons/            ← icon16.png, icon48.png, icon128.png
+extension/            ← Chrome MV3 extension
+  manifest.json
+  background.js       ← service worker (all API calls)
+  popup.html          ← three-tab UI (Transcript | Format | Translation)
+  popup.js            ← UI logic, delegates to background via messages
+  offscreen.html      ← offscreen document for clipboard access
+  offscreen.js        ← clipboard handler
+  icons/              ← icon16/48/128.png
 
-backend/            ← FastAPI backend
-  main.py           ← /transcript and /health endpoints (949 lines)
-  config.yaml       ← live config (gitignored)
-  config.example.yaml ← committed example
-  requirements.txt  ← Python dependencies
-  transcript_cache.db ← SQLite cache (auto-created)
+backend/              ← FastAPI backend
+  main.py             ← FastAPI app with /transcript and /health
+  config.yaml         ← live config (gitignored)
+  config.example.yaml ← committed template
+  transcript_cache.db ← SQLite cache (gitignored)
+  requirements.txt    ← Python dependencies
+  start.sh            ← convenience launcher
 ```
 
-The extension never calls `fetch()` for long-running operations from the popup — all transcription, formatting, and translation requests go through the background service worker, which survives popup closes. Lightweight path-autocomplete fetches are an exception and call `fetch()` directly from the popup with short timeouts.
+The extension never calls `fetch()` from the popup — all API requests go through the background service worker, which survives popup closes. State propagates via `chrome.runtime.sendMessage`.

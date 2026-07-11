@@ -51,7 +51,3 @@ backend/transcript_cache.db
 
 # Temp audio downloads
 backend/tmp/
-*.mp3
-*.m4a
-*.opus
-*.webm

@@ -460,7 +460,7 @@ async function handleTranslateStart(msg) {
         broadcastState(tabId);
 
         chrome.runtime
-          .sendMessage({ type: 'translation:update', tabId, text, sourceUrl: msg.sourceUrl })
+          .sendMessage({ type: 'translation:update', tabId, text })
           .catch(() => {});
         if (text) autoCopyIfEnabled(text);
         if (text) autoSaveIfEnabled(text);
@@ -491,7 +491,7 @@ async function handleTranslateStart(msg) {
       broadcastState(tabId);
 
       chrome.runtime
-        .sendMessage({ type: 'translation:update', tabId, text: translated, sourceUrl: msg.sourceUrl })
+        .sendMessage({ type: 'translation:update', tabId, text: translated })
         .catch(() => {});
       // Auto-copy / auto-save translated text
       if (translated) autoCopyIfEnabled(translated);

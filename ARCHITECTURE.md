@@ -150,34 +150,32 @@ User clicks "Translate" in popup
 ```
 User clicks "Format" in popup
   → popup.js: doFormat()
-    1. Determine source text:
-       - fmtSource="Transcript" → resultEl.value (transcript textarea)
-       - fmtSource="Translation" → tl2Result.value (translation textarea)
+    1. Get source text from resultEl.value (transcript textarea)
     2. Validate: source text not empty, currentTabId exists
     3. Normalize TextKit backend settings
     4. Update UI: button → "Stop" (danger style), clear result, disable Copy/Save/Download
     5. Fire-and-forget:
-       { type: 'format:start', tabId, text, host, port }
+       { type: 'format:start', tabId, text }
 
   → background.js: handleFormatStart(msg)
     1. Validate: tabId and text present
     2. Abort any in-flight format for this tab (handleFormatStop)
     3. Create new AbortController → formatControllers.set(tabId, controller)
     4. Start keepAlive
-    5. Persist state: fmtFormatting:{tabId}=true, fmtStatus:{tabId}="Formatting..."
-    6. Clear stale result: remove fmtResult:{tabId}
-    7. Broadcast { type: 'fmt:formatting', tabId, value: true }
-    8. Build URL: http://{host}:{port}/format?_={Date.now()}
-    9. POST { text }  (TextKit resolves the prompt internally)
-    10. On success:
+    5. Update in-memory state.format (active, status, sourceText)
+    6. Broadcast state:update (popup picks up format state from state.format)
+    7. Build URL: http://{host}:{port}/format?_={Date.now()}
+    8. POST { text }  (TextKit resolves the prompt internally)
+    9. On success:
         - Store fmtResult:{tabId} = payload.text
-        - Broadcast { type: 'format:update', tabId, text }
+        - Update state.format.resultText, status, active
+        - Broadcast state:update
         - If text: fmtAutoCopyIfEnabled(text), fmtAutoSaveIfEnabled(text)
-    11. On abort/timeout/error: same pattern as translate (store status, broadcast)
-    12. Finally: clear timeout, remove controller, broadcast fmt:formatting=false, stopKeepAlive if idle
+        - Trigger autoTranslate if enabled
+    10. On abort/timeout/error: update state.format.error/status, broadcast state:update
+    11. Finally: clear timeout, remove controller, stopKeepAlive if idle
 
-  → popup.js: receives 'format:update' and 'fmt:formatting' messages
-    - Same pattern as translation update messages
+  → popup.js: receives state:update → renderState() updates format tab from state.format
 ```
 
 ### 2.3 Save (translation or format result)
@@ -276,14 +274,14 @@ Translation/Format progress is stored in `chrome.storage.local` (survives SW res
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `transcript:${tabId}` | string | Transcript result text (existing) |
-| `tl2Result:${tabId}` | string | Translation result text |
-| `tl2Language:${tabId}` | string | Selected language for this tab |
-| `tl2Status:${tabId}` | string | Status text ("Translating to Chinese...", "Translation complete.", etc.) |
+| `transcript:${tabId}` | object | `{ text, url }` — transcript result with source URL for cache validation |
+| `transcript_raw:${tabId}` | string | Original transcript text (for format retry) |
+| `translate:result:${tabId}` | string | Translation result text |
+| `tl2Language:${tabId}` | string | Selected language for translation tab |
 | `tl2Translating:${tabId}` | boolean | Whether translation is in-flight |
 | `fmtResult:${tabId}` | string | Format result text |
-| `fmtStatus:${tabId}` | string | Status text ("Formatting...", "Formatting complete.", etc.) |
-| `fmtFormatting:${tabId}` | boolean | Whether formatting is in-flight |
+
+> **Note:** Translation and Format progress/status are tracked in-memory via the per-tab `states` Map (`state.translate.*`, `state.format.*`), not in chrome.storage.local. Only results and in-flight flags are persisted.
 
 ### 3.3 chrome.storage.local keys (global, not per-tab)
 
@@ -355,11 +353,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 | Type | Payload | Description |
 |------|---------|-------------|
-| `state:update` | `{tabId, state}` | State changed (existing, extended) |
-| `translation:update` | `{tabId, text, error?}` | **NEW** Translation result or error |
-| `tl2:translating` | `{tabId, value}` | **NEW** Translation in-flight state changed |
-| `format:update` | `{tabId, text, error?}` | **NEW** Format result or error |
-| `fmt:formatting` | `{tabId, value}` | **NEW** Format in-flight state changed |
+| `state:update` | `{tabId, state}` | Full state update — includes transcript, format, and translate sub-states |
+| `translation:update` | `{tabId, text, error?}` | Translation result or error |
+| `tl2:translating` | `{tabId, value}` | Translation in-flight state changed |
+
+> **Note:** Format state is propagated through `state:update` (via `state.format`), not through dedicated `format:update` or `fmt:formatting` messages.
 
 ### 4.3 Background → Offscreen (for clipboard)
 
@@ -380,10 +378,10 @@ handleStart() completes successfully
         Calls TextKit /format (TextKit resolves the prompt internally)
         On success → stores fmtResult:{tabId}, broadcasts format:update
           └─→ auto-translate is triggered from format completion (see 5.2)
-        On failure → broadcasts format:update with error (no translate)
+        On failure → broadcasts state:update with error (no translate)
 ```
 
-### 5.3 Trigger: Translation completes
+### 5.2 Trigger: Translation completes
 
 ```
 handleTranslateStart() completes successfully (translated text is non-empty)
@@ -397,7 +395,7 @@ handleTranslateStart() completes successfully (translated text is non-empty)
         Shows notification on success/failure
 ```
 
-### 5.2 Trigger: Format completes
+### 5.3 Trigger: Format completes
 
 ```
 handleFormatStart() completes successfully (formatted text is non-empty)
@@ -414,8 +412,8 @@ handleFormatStart() completes successfully (formatted text is non-empty)
         Reads tl2Language:{tabId} from local storage
         If language is "original" → skip (TextKit would pass through too)
         Calls TextKit /translate (TextKit resolves the prompt internally)
-        On success → stores tl2Result:{tabId}, broadcasts translation:update
-          └─→ triggers auto-copy/auto-save for translation (see 5.3)
+        On success → stores translate:result:{tabId}, broadcasts translation:update
+          └─→ triggers auto-copy/auto-save for translation (see 5.2)
 ```
 
 **Manual format also triggers auto-translate** — the same `autoTranslate()` call fires whether format was triggered automatically (from transcript completion) or manually (user clicked Format button).
@@ -629,10 +627,9 @@ Commands: `Ctrl+Shift+T` / `Cmd+Shift+T` triggers transcript extraction.
 each with 60-second cache expiry. Both use `buildBackendEndpoint()` + `normalizeBackendSettings()`.
 
 **State management:**
-- `states` Map: per-tab transcript state
-- `translateControllers` / `formatControllers` Maps: separate AbortController per tab per operation
-- `popupFormatControllers` / `popupTranslateControllers` Maps: unified flow controllers
-- `keepAliveIntervalId`: prevents SW termination during long operations
+| `states` Map: per-tab state including transcript, format, and translate sub-states
+| `translateControllers` / `formatControllers` Maps: separate AbortController per tab per operation
+| `keepAliveIntervalId`: prevents SW termination during long operations
 
 **Auto-action triggers:**
 - Transcript completes → `autoFormat()` — calls TextKit `/format` (unconditional)
@@ -669,16 +666,13 @@ popup.js init()
   5. Load persisted transcript result (existing)
   6. Load translation tab state:
      - tl2Language:{tabId} → set language selector
-     - tl2Result:{tabId} → fill textarea, enable buttons
-     - tl2Status:{tabId} → set status bar
+     - translate:result:{tabId} → fill textarea, enable buttons
      - tl2Translating:{tabId} → restore "Stop" button if was translating
      - Handle "completed while closed" case:
        if translating && has result → show result, clear translating flag
        if translating && no result → show "Stop" button
   7. Load format tab state (same pattern):
      - fmtResult:{tabId} → fill textarea, enable buttons
-     - fmtStatus:{tabId} → set status bar
-     - fmtFormatting:{tabId} → restore "Stop" button if was formatting
   8. Load path suggestions from TextKit backend /paths
   9. Update all button states
 ```
