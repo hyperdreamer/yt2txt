@@ -107,11 +107,7 @@ downloadBtn.addEventListener('click', downloadText);
 // Format panel
 formatBtn.addEventListener('click', doFormat);
 formatCopy.addEventListener('click', () => copyResult(formatResult, formatCopy));
-formatPrompt.addEventListener('input', () => {
-  if (currentTabId) {
-    chrome.storage.local.set({ [`format:prompt:${currentTabId}`]: formatPrompt.value });
-  }
-});
+formatPrompt.addEventListener('input', () => {});
 formatSave.addEventListener('click', saveFormatResult);
 fmtAutocopyCheckbox.addEventListener('change', saveFmtSettings);
 fmtAutosaveCheckbox.addEventListener('change', saveFmtSettings);
@@ -162,11 +158,6 @@ chrome.runtime.onMessage.addListener((message) => {
     if (message.tabId !== currentTabId) return;
     if (message.text) {
       tl2Result.value = message.text;
-      // Store with sourceUrl so init() validates on reopen
-      const lang = tl2Language.value;
-      chrome.storage.local.set({
-        [`tl2Result:${currentTabId}`]: { text: message.text, sourceUrl: message.sourceUrl || urlInput.value, language: lang },
-      });
     } else if (message.error) {
       // Error path: keep any existing result visible
     }
@@ -281,47 +272,19 @@ async function init() {
     }
   }
 
-  // Load translation tab state (per-tab)
+  // Load translation tab language preference (per-tab)
   if (currentTabId) {
-    const tl2Keys = [
-      `tl2Result:${currentTabId}`,
-      `tl2Language:${currentTabId}`,
-      `tl2Status:${currentTabId}`,
-      `tl2Translating:${currentTabId}`,
-    ];
-    const tl2Stored = await chrome.storage.local.get(tl2Keys);
-    if (tl2Stored[`tl2Language:${currentTabId}`]) {
-      tl2Language.value = tl2Stored[`tl2Language:${currentTabId}`];
-    }
-    if (tl2Stored[`tl2Result:${currentTabId}`]) {
-      const entry = tl2Stored[`tl2Result:${currentTabId}`];
-      if (typeof entry === 'object' && entry.text) {
-        if (entry.sourceUrl === tab?.url) {
-          tl2Result.value = entry.text;
-          if (entry.language) tl2Language.value = entry.language;
-        }
-        // sourceUrl mismatch → leave empty
-      } else if (typeof entry === 'string') {
-        // Legacy format
-        tl2Result.value = entry;
-      }
-    }
-    if (tl2Stored[`tl2Status:${currentTabId}`]) {
-      setTl2Progress(tl2Stored[`tl2Status:${currentTabId}`]);
+    const tl2Lang = await chrome.storage.local.get(`tl2Language:${currentTabId}`);
+    if (tl2Lang[`tl2Language:${currentTabId}`]) {
+      tl2Language.value = tl2Lang[`tl2Language:${currentTabId}`];
     }
 
     // Restore "Stop" button state if mid-translation
-    if (tl2Stored[`tl2Translating:${currentTabId}`]) {
-      // If we also have a result, this is "completed while closed" — show result.
-      if (tl2Result.value.trim()) {
-        chrome.storage.local.remove(`tl2Translating:${currentTabId}`);
-        tl2Translate.textContent = 'Translate';
-        tl2Translate.classList.remove('danger');
-      } else {
-        tl2Translate.textContent = 'Stop';
-        tl2Translate.classList.add('danger');
-        setTl2Progress('Translating...');
-      }
+    const tl2Translating = await chrome.storage.local.get(`tl2Translating:${currentTabId}`);
+    if (tl2Translating[`tl2Translating:${currentTabId}`]) {
+      tl2Translate.textContent = 'Stop';
+      tl2Translate.classList.add('danger');
+      setTl2Progress('Translating...');
     }
   }
 
@@ -329,37 +292,21 @@ async function init() {
   await loadTranslatePromptForLanguage();
   loadPathSuggestions();
 
-  // Restore unified Format tab state (per-tab)
-  if (currentTabId) {
-    const fmtKeys = [
-      `format:result:${currentTabId}`,
-      `format:status:${currentTabId}`,
-      `format:prompt:${currentTabId}`,
-    ];
-    const fmtStored = await chrome.storage.local.get(fmtKeys);
-    if (fmtStored[`format:result:${currentTabId}`]) {
-      formatResult.value = fmtStored[`format:result:${currentTabId}`];
-      formatCopy.disabled = false;
-    }
-    if (fmtStored[`format:prompt:${currentTabId}`]) {
-      formatPrompt.value = fmtStored[`format:prompt:${currentTabId}`];
-    }
-    // If no per-tab prompt, try textkit backend
-    if (!formatPrompt.value.trim()) {
-      try {
-        const host = textkitHostInput.value.trim() || 'localhost';
-        const port = parseInt(textkitPortInput.value, 10) || 8765;
-        const resp = await _popupFetch(`http://${host}:${port}/prompts/format`);
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data.template) formatPrompt.value = data.template;
-        }
-      } catch {}
-    }
-    // Format button enabled if transcript has text
-    if (resultEl.value.trim()) {
-      formatBtn.disabled = false;
-    }
+  // Load format prompt from textkit backend if no per-tab prompt set
+  if (currentTabId && !formatPrompt.value.trim()) {
+    try {
+      const host = textkitHostInput.value.trim() || 'localhost';
+      const port = parseInt(textkitPortInput.value, 10) || 8765;
+      const resp = await _popupFetch(`http://${host}:${port}/prompts/format`);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.template) formatPrompt.value = data.template;
+      }
+    } catch {}
+  }
+  // Format button enabled if transcript has text
+  if (resultEl.value.trim()) {
+    formatBtn.disabled = false;
   }
 
   updateResultButtons();

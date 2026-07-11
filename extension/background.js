@@ -186,19 +186,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       `transcript:${tabId}`,
       `transcript_raw:${tabId}`,
       `status:${tabId}`,
-      `tl2Result:${tabId}`,
       `tl2Language:${tabId}`,
-      `tl2Status:${tabId}`,
       `tl2Translating:${tabId}`,
-      `fmtResult:${tabId}`,
-      `fmtStatus:${tabId}`,
       `fmtFormatting:${tabId}`,
-      // Unified tab persistence
-      `format:result:${tabId}`,
-      `format:status:${tabId}`,
-      `format:prompt:${tabId}`,
-      `translate:result:${tabId}`,
-      `translate:status:${tabId}`,
       `translate:language:${tabId}`,
       `translate:prompt:${tabId}`,
     ])
@@ -491,11 +481,7 @@ async function handleTranslateStart(msg) {
     // Persist state so popup reopen shows "Stop" button.
     await chrome.storage.local.set({
       [`tl2Translating:${tabId}`]: true,
-      [`tl2Status:${tabId}`]: `Translating to ${language}...`,
     });
-    // Clear stale result so init() doesn't mistake an old result
-    // for a just-completed translation.
-    await chrome.storage.local.remove(`tl2Result:${tabId}`);
     chrome.runtime
       .sendMessage({ type: 'tl2:translating', tabId, value: true })
       .catch(() => {});
@@ -519,9 +505,6 @@ async function handleTranslateStart(msg) {
       // "Original" with no custom prompt → pass through unchanged
       if (language === 'original' && !prompt) {
         const translated = text;
-        await chrome.storage.local.set({
-          [`tl2Result:${tabId}`]: { text: translated, sourceUrl: msg.sourceUrl || '', language },
-        });
         chrome.runtime
           .sendMessage({ type: 'translation:update', tabId, text: translated, sourceUrl: msg.sourceUrl })
           .catch(() => {});
@@ -535,9 +518,6 @@ async function handleTranslateStart(msg) {
       // no API call is needed — just pass through and auto-save/copy.
       const sourceName = LANG_CODE_TO_NAME[msg.sourceLang];
       if (sourceName && sourceName.toLowerCase() === language.toLowerCase()) {
-        await chrome.storage.local.set({
-          [`tl2Result:${tabId}`]: { text, sourceUrl: msg.sourceUrl || '', language },
-        });
         chrome.runtime
           .sendMessage({ type: 'translation:update', tabId, text, sourceUrl: msg.sourceUrl })
           .catch(() => {});
@@ -560,9 +540,6 @@ async function handleTranslateStart(msg) {
       if (payload.error) throw new Error(payload.error);
 
       const translated = payload.text || '';
-      await chrome.storage.local.set({
-        [`tl2Result:${tabId}`]: { text: translated, sourceUrl: msg.sourceUrl || '', language },
-      });
       chrome.runtime
         .sendMessage({ type: 'translation:update', tabId, text: translated, sourceUrl: msg.sourceUrl })
         .catch(() => {});
@@ -574,7 +551,6 @@ async function handleTranslateStart(msg) {
     } catch (e) {
       if (e.name === 'AbortError') {
         const message = timedOut ? 'Translation timed out.' : 'Translation stopped.';
-        await chrome.storage.local.set({ [`tl2Status:${tabId}`]: message });
         if (timedOut) {
           chrome.runtime
             .sendMessage({ type: 'translation:update', tabId, text: '', error: message })
@@ -583,7 +559,6 @@ async function handleTranslateStart(msg) {
         return { ok: !timedOut, error: timedOut ? message : undefined };
       }
       const errorMessage = e.message || 'Translation failed.';
-      await chrome.storage.local.set({ [`tl2Status:${tabId}`]: errorMessage });
       chrome.runtime
         .sendMessage({ type: 'translation:update', tabId, text: '', error: errorMessage })
         .catch(() => {});
@@ -654,7 +629,6 @@ async function handleFormatStart(msg) {
     await chrome.storage.local.set({
       [`fmtFormatting:${tabId}`]: true,
       [`fmtStatus:${tabId}`]: 'Formatting...',
-      [`format:status:${tabId}`]: 'Formatting...',
     });
     await chrome.storage.local.remove(`fmtResult:${tabId}`);
     chrome.runtime
@@ -675,21 +649,13 @@ async function handleFormatStart(msg) {
       if (payload.error) throw new Error(payload.error);
 
       const formatted = payload.text || '';
-      await chrome.storage.local.set({
-        [`fmtResult:${tabId}`]: formatted,
-        [`format:result:${tabId}`]: formatted,
-        [`format:status:${tabId}`]: 'Formatted ✓',
-      });
       chrome.runtime
         .sendMessage({ type: 'format:update', tabId, text: formatted })
         .catch(() => {});
     } catch (e) {
       if (e.name === 'AbortError') {
         const message = timedOut ? 'Formatting timed out.' : 'Formatting stopped.';
-        await chrome.storage.local.set({
-          [`fmtStatus:${tabId}`]: message,
-          [`format:status:${tabId}`]: message,
-        });
+        await chrome.storage.local.set({ [`fmtStatus:${tabId}`]: message });
         if (timedOut) {
           chrome.runtime
             .sendMessage({ type: 'format:update', tabId, text: '', error: message })
@@ -698,10 +664,7 @@ async function handleFormatStart(msg) {
         return { ok: !timedOut, error: timedOut ? message : undefined };
       }
       const errorMessage = e.message || 'Formatting failed.';
-      await chrome.storage.local.set({
-        [`fmtStatus:${tabId}`]: errorMessage,
-        [`format:status:${tabId}`]: errorMessage,
-      });
+      await chrome.storage.local.set({ [`fmtStatus:${tabId}`]: errorMessage });
       chrome.runtime
         .sendMessage({ type: 'format:update', tabId, text: '', error: errorMessage })
         .catch(() => {});
@@ -785,15 +748,6 @@ async function handlePopupFormatStart(msg) {
     state.format.status = 'Formatted ✓';
     state.format.error = '';
     state.format.active = false;
-
-    // Persist result + status so popup reopen can restore them
-    await chrome.storage.local.set({
-      [`format:result:${tabId}`]: formatted,
-      [`format:status:${tabId}`]: 'Formatted ✓',
-    });
-    if (prompt) {
-      await chrome.storage.local.set({ [`format:prompt:${tabId}`]: prompt });
-    }
 
     broadcastState(tabId);
 
@@ -901,15 +855,10 @@ async function handlePopupTranslateStart(msg) {
     state.translate.error = '';
     state.translate.active = false;
 
-    // Persist result + status + language so popup reopen can restore them
+    // Persist language preference only
     await chrome.storage.local.set({
-      [`translate:result:${tabId}`]: translated,
-      [`translate:status:${tabId}`]: 'Translation complete.',
       [`translate:language:${tabId}`]: targetLanguage || 'zh',
     });
-    if (prompt) {
-      await chrome.storage.local.set({ [`translate:prompt:${tabId}`]: prompt });
-    }
 
     broadcastState(tabId);
   } catch (e) {
