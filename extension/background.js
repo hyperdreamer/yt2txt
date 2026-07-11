@@ -732,7 +732,7 @@ function handleFormatStop(tabId) {
   }
 }
 
-// ── Unified Format handler (YT2TXT /format) ───────────────────
+// ── Unified Format handler (TextKit /format) ───────────────────
 async function handlePopupFormatStart(msg) {
   const { tabId, text, prompt } = msg;
   if (!tabId || !text) {
@@ -764,7 +764,7 @@ async function handlePopupFormatStart(msg) {
     state.format.error = '';
     broadcastState(tabId);
 
-    const baseUrl = await getYt2txtEndpoint('/format');
+    const baseUrl = await getTextkitEndpoint('/format');
     const url = `${baseUrl}?_=${Date.now()}`;
     const response = await fetch(url, {
       method: 'POST',
@@ -842,7 +842,7 @@ function handlePopupFormatStop(tabId) {
   }
 }
 
-// ── Unified Translate handler (YT2TXT /translate) ──────────────
+// ── Unified Translate handler (TextKit /translate) ──────────────
 async function handlePopupTranslateStart(msg) {
   const { tabId, text, targetLanguage, prompt } = msg;
   if (!tabId || !text) {
@@ -875,15 +875,15 @@ async function handlePopupTranslateStart(msg) {
     state.translate.error = '';
     broadcastState(tabId);
 
-    const baseUrl = await getYt2txtEndpoint('/translate');
+    const baseUrl = await getTextkitEndpoint('/translate');
     const url = `${baseUrl}?_=${Date.now()}`;
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text,
-        target_language: targetLanguage || 'zh',
-        prompt: prompt || '',
+        language: targetLanguage || 'zh',
+        prompt: prompt || undefined,
       }),
       signal: controller.signal,
     });
