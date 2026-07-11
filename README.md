@@ -7,7 +7,7 @@ A Chrome Manifest V3 extension + FastAPI backend that extracts transcripts from 
 2. **No subtitles** → audio is downloaded and transcribed via OpenAI-compatible API (`gpt-4o-transcribe` or `gpt-4o-min-transcribe`).
 
 **Two-tab UI:**
-- **Transcript tab** — language selection, transcript extraction, formatting
+- **Transcript tab** — transcript extraction, formatting
 - **Translation tab** — translate transcripts with configurable prompts, auto-copy/auto-save
 
 ## Prerequisites
@@ -67,15 +67,10 @@ The server starts on `http://127.0.0.1:8666` by default.
 ### Transcript tab
 
 1. Navigate to a video page (YouTube, Vimeo, etc.)
-2. Select the language for subtitles / transcription hint
-3. Click **Get Transcript**
-4. Watch the status bar — it will show progress (checking subtitles → downloading audio → transcribing)
-5. **Format** the result with AI for improved readability
-6. Copy or download
-
-If the selected language isn't available in subtitles, the extension falls back to:
-- **Subtitles**: the video's original language (yt-dlp default)
-- **Transcription**: auto-detection (no language hint passed to API)
+2. Click **Get Transcript**
+3. Watch the status bar — it will show progress (checking subtitles → downloading audio → transcribing)
+4. **Format** the result with AI for improved readability
+5. Copy or download
 
 ### Translation tab
 
@@ -102,7 +97,6 @@ Returns `{"status": "ok"}`.
 ```json
 {
   "url": "https://www.youtube.com/watch?v=...",
-  "language": "en",                  // optional, for subtitle selection + transcription hint
   "model": "gpt-4o-transcribe",      // optional, defaults to config
   "force": false                     // optional, bypass cache
 }

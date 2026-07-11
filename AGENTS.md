@@ -60,19 +60,18 @@ wildcard does not expand the attack surface beyond the local machine.
 Returns `{"status": "ok"}`.
 
 ### POST /transcript
-Request: `{"url": "https://...", "language": "en", "model": "gpt-4o-transcribe", "force": false}`
+Request: `{"url": "https://...", "model": "gpt-4o-transcribe", "force": false}`
 Response: `{"text": "...", "source": "subtitles"|"transcription", "model": "...", "error": null|"..."}`
 
 Flow:
 1. Validate URL is a non-empty string.
 2. Check SQLite cache (30-day TTL, keyed by video ID). Skip if `force: true`.
-3. Run `yt-dlp --list-subs --skip-download <url>` to discover available subtitle languages.
-4. Parse manual and auto-generated subtitle language codes.
-5. If requested language is available → download subtitles, parse to plain text.
-6. If requested language is NOT available → fall back to default (original language) subtitles. Clear the transcription language hint so the API auto-detects.
-7. If no subtitles at all → download audio (64kbps mono mp3), transcribe via OpenAI-compatible API with the language hint.
-8. For large audio (>24MB or >1300s) → split into overlapping chunks with ffmpeg, transcribe each, deduplicate overlap text.
-9. Cache the result in SQLite for 30 days. Return with source and model info.
+3. Try to download manual subtitles (no language filter — yt-dlp picks the video's default).
+4. If manual subs aren't available, try to download auto-generated captions (no language filter).
+5. If a subtitle file is produced → parse to plain text and return.
+6. Otherwise, download audio (64kbps mono mp3) and transcribe via OpenAI-compatible API. No language hint is passed — the API auto-detects the spoken language.
+7. For large audio (>24MB or >1300s) → split into overlapping chunks with ffmpeg, transcribe each, deduplicate overlap text.
+8. Cache the result in SQLite for 30 days. Return with source and model info.
 
 ## Backend config (config.yaml)
 ```yaml
@@ -109,7 +108,6 @@ cache:
 ### Transcript tab
 - Host/port inputs for YT2TXT backend (saved to chrome.storage.sync).
 - Host/port inputs for TextKit backend (auto-filled from YT2TXT host if empty).
-- Language selector: sets subtitle language + transcription hint. Falls back to default when unavailable.
 - URL input pre-filled with current tab URL on popup open.
 - "Get Transcript" button (disabled while active).
 - "Force refresh" checkbox (bypass cache, auto-clears after start).

@@ -368,7 +368,7 @@ async function handleStart(msg) {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: msg.url, language: msg.lang || 'en', force: msg.force || false }),
+        body: JSON.stringify({ url: msg.url, force: msg.force || false }),
       },
       controller.signal
     );
@@ -428,7 +428,7 @@ async function handleStart(msg) {
   if (resultText) {
     // Cache original transcript before formatting (for retry on format failure)
     await chrome.storage.local.set({ [`transcript_raw:${tab.id}`]: resultText });
-    try { await autoTranslate(tab.id, resultText, msg.url, msg.lang); } catch (e) { console.error('autoTranslate failed:', e); }
+    try { await autoTranslate(tab.id, resultText, msg.url); } catch (e) { console.error('autoTranslate failed:', e); }
     try { await autoFormatIfEnabled(tab.id, resultText); } catch (e) { console.error('autoFormatIfEnabled failed:', e); }
   }
 
@@ -1079,7 +1079,7 @@ async function handleFormatRetry(msg) {
 }
 
 // ── Auto-translate helper (called from handleStart) ────────────
-async function autoTranslate(tabId, text, sourceUrl, sourceLang) {
+async function autoTranslate(tabId, text, sourceUrl) {
   const { yt2txtAutoTranslate } = await chrome.storage.sync.get({
     yt2txtAutoTranslate: false,
   });
@@ -1107,7 +1107,6 @@ async function autoTranslate(tabId, text, sourceUrl, sourceLang) {
     text,
     language,
     sourceUrl,
-    sourceLang,
     host: backend.textkitHost,
     port: backend.textkitPort,
   }).catch((e) => console.error('autoTranslate failed:', e));

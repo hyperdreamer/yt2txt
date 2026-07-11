@@ -313,7 +313,6 @@ Translation/Format progress is stored in `chrome.storage.local` (survives SW res
 |-----|------|---------|-------------|
 | `yt2txtHost` | string | `'localhost'` | YT2TXT backend host (existing) |
 | `yt2txtPort` | number | `8666` | YT2TXT backend port (existing) |
-| `yt2txtLang` | string | `''` | Language for transcript extraction (existing) |
 | `textkitHost` | string | `'localhost'` | **NEW** TextKit backend host |
 | `textkitPort` | number | `8765` | **NEW** TextKit backend port |
 | `tl2AutoCopy` | boolean | `false` | **NEW** Auto-copy translation |
@@ -486,7 +485,6 @@ async function autoFormatIfEnabled(tabId, text, host, port) {
 ```
 yt2txtHost          string   "localhost"
 yt2txtPort          number   8666
-yt2txtLang          string   ""          (existing)
 textkitHost         string   "localhost" (NEW)
 textkitPort         number   8765        (NEW)
 tl2AutoCopy         boolean  false       (NEW)
@@ -757,7 +755,7 @@ The existing yt2txt popup.css (inline in popup.html) uses a dark-first theme wit
 popup.js init()
   1. Query active tab → currentTabId
   2. Load sync settings:
-     - yt2txtHost, yt2txtPort, yt2txtLang (existing)
+     - yt2txtHost, yt2txtPort (existing)
      - textkitHost, textkitPort (NEW)
      - tl2AutoCopy, tl2AutoSave, tl2AutoSavePath, yt2txtAutoTranslate (NEW)
      - fmtAutoCopy, fmtAutoSave, fmtAutoSavePath (NEW)

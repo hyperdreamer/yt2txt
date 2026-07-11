@@ -30,7 +30,6 @@ const fmtAutosavePath = document.getElementById('fmt-autosave-path');
 const fmtPathSuggestions = document.getElementById('fmt-path-suggestions');
 const hostInput = document.getElementById('host');
 const portInput = document.getElementById('port');
-const langSelect = document.getElementById('lang');
 const forceCheckbox = document.getElementById('force');
 
 // ── Translation panel elements ────────────────────────────────
@@ -117,7 +116,6 @@ fmtAutosavePath.addEventListener('input', () => {
 });
 hostInput.addEventListener('change', saveYt2txtSettings);
 portInput.addEventListener('change', saveYt2txtSettings);
-langSelect.addEventListener('change', saveYt2txtSettings);
 resultEl.addEventListener('input', () => {
   userEditedResult = true;
   updateResultButtons();
@@ -215,7 +213,6 @@ async function init() {
   const items = await chrome.storage.sync.get({
     yt2txtHost: 'localhost',
     yt2txtPort: 8666,
-    yt2txtLang: '',
     textkitHost: '',
     textkitPort: 8765,
     tl2AutoCopy: false,
@@ -229,7 +226,6 @@ async function init() {
 
   hostInput.value = items.yt2txtHost;
   portInput.value = items.yt2txtPort;
-  langSelect.value = items.yt2txtLang;
   textkitHostInput.value = items.textkitHost;
   textkitPortInput.value = items.textkitPort;
 
@@ -319,7 +315,6 @@ async function saveYt2txtSettings() {
   await chrome.storage.sync.set({
     yt2txtHost: hostInput.value.trim() || 'localhost',
     yt2txtPort: parseInt(portInput.value, 10) || 8666,
-    yt2txtLang: langSelect.value,
   });
 }
 
@@ -517,7 +512,6 @@ async function startCapture() {
     const response = await chrome.runtime.sendMessage({
       type: 'popup:start',
       url,
-      lang: langSelect.value,
       force: forceCheckbox.checked,
     });
     forceCheckbox.checked = false;
@@ -681,7 +675,6 @@ async function doTranslation() {
       text,
       language,
       sourceUrl: urlInput.value,
-      sourceLang: langSelect.value,
       host,
       port,
     });
