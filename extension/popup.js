@@ -269,13 +269,11 @@ async function init() {
     }
   }
 
-  // Load translation tab language preference (per-tab)
-  if (currentTabId) {
-    const tl2Lang = await chrome.storage.local.get(`tl2Language:${currentTabId}`);
-    if (tl2Lang[`tl2Language:${currentTabId}`]) {
-      tl2Language.value = tl2Lang[`tl2Language:${currentTabId}`];
-    }
+  // Load translation tab language preference (global)
+  const { tl2Language: tl2Lang } = await chrome.storage.sync.get({ tl2Language: 'original' });
+  tl2Language.value = tl2Lang || 'original';
 
+  if (currentTabId) {
     // Restore "Stop" button state if mid-translation
     const tl2Translating = await chrome.storage.local.get(`tl2Translating:${currentTabId}`);
     if (tl2Translating[`tl2Translating:${currentTabId}`]) {
@@ -322,8 +320,7 @@ function saveTl2Settings() {
 }
 
 function saveTl2Language() {
-  if (!currentTabId) return;
-  chrome.storage.local.set({ [`tl2Language:${currentTabId}`]: tl2Language.value });
+  chrome.storage.sync.set({ tl2Language: tl2Language.value });
 }
 
 // ── Format tab settings ──────────────────────────────────────

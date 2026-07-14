@@ -166,7 +166,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     .remove([
       `transcript:${tabId}`,
       `transcript_raw:${tabId}`,
-      `tl2Language:${tabId}`,
       `tl2Translating:${tabId}`,
       `fmtResult:${tabId}`,
       `translate:result:${tabId}`,
@@ -766,10 +765,9 @@ async function autoTranslate(tabId, text, sourceUrl) {
   });
   if (!yt2txtAutoTranslate) return;
 
-  // Read language from Translation tab's per-tab setting
-  const tl2LangKey = `tl2Language:${tabId}`;
-  const tl2Lang = await chrome.storage.local.get(tl2LangKey);
-  const language = tl2Lang[tl2LangKey] || 'original';
+  // Read language from Translation tab's global setting
+  const { tl2Language } = await chrome.storage.sync.get({ tl2Language: 'original' });
+  const language = tl2Language || 'original';
   // "Original" → no translation needed (TextKit's prompt chain handles nothing-to-do).
   if (language === 'original') return;
 
