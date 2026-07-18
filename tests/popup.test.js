@@ -34,6 +34,7 @@ function createPopupHarness(options = {}) {
   };
 
   const fetchCalls = [];
+  const runtimeMessages = [];
 
   // ---- minimal DOM elements -------------------------------------------
   function el(id, overrides = {}) {
@@ -148,7 +149,7 @@ function createPopupHarness(options = {}) {
     },
     runtime: {
       onMessage: { addListener() {} },
-      sendMessage() { return Promise.resolve({ ok: true }); },
+      sendMessage(msg) { runtimeMessages.push(msg); return Promise.resolve({ ok: true }); },
     },
     commands: { onCommand: { addListener() {} } },
   };
@@ -181,7 +182,7 @@ function createPopupHarness(options = {}) {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(POPUP_PATH, 'utf8'), context, { filename: POPUP_PATH });
 
-  return { context, elements, fetchCalls, syncValues };
+  return { context, elements, fetchCalls, syncValues, runtimeMessages };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -465,4 +466,36 @@ test('File Bridge port uses file-bridge-port ID (not filebridge-port)', () => {
     'file-bridge-port',
     'ID should be file-bridge-port',
   );
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// doTranslation sends translate:start with minimal payload
+// ═══════════════════════════════════════════════════════════════════
+
+test('doTranslation sends translate:start with only type, tabId, text, language', async () => {
+  const harness = createPopupHarness();
+  const transcriptText = 'Hello, world.';
+  const targetLang = 'Chinese';
+
+  // init() sets currentTabId from tabs.query (returns id:1 in harness)
+  await harness.context.init();
+
+  // Set source text and target language on the existing elements
+  harness.elements['result'].value = transcriptText;
+  harness.elements['tl2-language'].value = targetLang;
+
+  // Clear any messages sent during init
+  harness.runtimeMessages.length = 0;
+
+  await harness.context.doTranslation();
+
+  const startMsgs = harness.runtimeMessages.filter(m => m.type === 'translate:start');
+  assert.equal(startMsgs.length, 1, 'exactly one translate:start message');
+  const msg = startMsgs[0];
+  assert.equal(msg.tabId, 1);
+  assert.equal(msg.text, transcriptText);
+  assert.equal(msg.language, targetLang);
+  assert.equal(Object.keys(msg).includes('sourceUrl'), false, 'must not include sourceUrl');
+  assert.equal(Object.keys(msg).includes('host'), false, 'must not include host');
+  assert.equal(Object.keys(msg).includes('port'), false, 'must not include port');
 });

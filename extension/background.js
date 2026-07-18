@@ -447,7 +447,7 @@ async function handleStop() {
 
 // ── Handle translate start ─────────────────────────────────────
 async function handleTranslateStart(msg) {
-  const { tabId, text, language, host, port } = msg;
+  const { tabId, text, language } = msg;
   if (!tabId || !text) return { ok: false, error: 'Missing tabId or text' };
 
   // Abort any in-flight translation for this tab
@@ -577,7 +577,17 @@ function handleTranslateStop(tabId) {
   if (controller) {
     controller.abort();
     translateControllers.delete(tabId);
-    chrome.storage.local.remove(`tl2Translating:${tabId}`);
+  }
+  chrome.storage.local.remove(`tl2Translating:${tabId}`);
+  chrome.runtime
+    .sendMessage({ type: 'tl2:translating', tabId, value: false })
+    .catch(() => {});
+  const state = states.get(tabId);
+  if (state?.translate?.active) {
+    state.translate.active = false;
+    state.translate.status = 'Translation stopped.';
+    state.translate.error = '';
+    broadcastState(tabId);
   }
 }
 
@@ -822,17 +832,9 @@ async function autoTranslate(tabId, text) {
   // "Original" → no translation needed (TextKit's prompt chain handles nothing-to-do).
   if (language === 'original') return;
 
-  // Pull TextKit host/port from sync storage for the auto path
-  const backend = await chrome.storage.sync.get({
-    textkitHost: DEFAULT_HOST,
-    textkitPort: DEFAULT_TEXTKIT_PORT,
-  });
-
   handleTranslateStart({
     tabId,
     text,
     language,
-    host: backend.textkitHost,
-    port: backend.textkitPort,
   }).catch((e) => console.error('autoTranslate failed:', e));
 }

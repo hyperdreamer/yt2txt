@@ -98,11 +98,10 @@ Rationale:
 User clicks "Translate" in popup
   → popup.js: doTranslation()
     1. Validate: text not empty, currentTabId exists
-    2. Normalize TextKit backend settings (host/port from inputs)
-    3. Update UI: button → "Stop" (danger style), clear result, disable Copy/Save/Download
-    4. Fire-and-forget message to background:
-       { type: 'translate:start', tabId, text, language, sourceUrl, host, port }
-    5. Do NOT await — popup stays responsive for Stop button
+    2. Update UI: button → "Stop" (danger style), clear result, disable Copy/Save/Download
+    3. Fire-and-forget message to background:
+       { type: 'translate:start', tabId, text, language }
+    4. Do NOT await — popup stays responsive for Stop button
 
   → background.js: handleTranslateStart(msg)
     1. Validate: tabId and text present
@@ -112,7 +111,7 @@ User clicks "Translate" in popup
     5. Persist state: tl2Translating:{tabId}=true
     6. Broadcast { type: 'tl2:translating', tabId, value: true }
     7. Handle "original" language → pass-through (no API call, no prompt)
-    8. Build URL: http://{host}:{port}/translate?_={Date.now()}
+    8. Resolve TextKit endpoint via getTextkitEndpoint('/translate')
     9. POST { text, language }  (TextKit resolves the prompt internally)
     10. On success:
         - Store translate:result:{tabId} = payload.text
@@ -339,7 +338,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 | `popup:start` | popup→bg | `{url, lang, force}` | `{ok, error?}` | Start transcript extraction (existing) |
 | `popup:stop` | popup→bg | (none) | `{ok, error?}` | Stop transcript extraction (existing) |
 | `popup:get-state` | popup→bg | (none) | `{ok, state, tabId}` | Get current state (existing) |
-| `translate:start` | popup→bg | `{tabId, text, language, sourceUrl, host, port}` | `{ok, error?}` | **NEW** Start translation |
+| `translate:start` | popup→bg | `{tabId, text, language}` | `{ok, error?}` | **NEW** Start translation (bg resolves TextKit endpoint internally) |
 | `translate:stop` | popup→bg | `{tabId}` | `{ok}` | **NEW** Stop translation |
 | `format:start` | popup→bg | `{tabId, text}` | `{ok, error?}` | **NEW** Start formatting (no `prompt` — TextKit owns it; bg resolves host/port via `getTextkitEndpoint`) |
 | `format:stop` | popup→bg | `{tabId}` | `{ok}` | **NEW** Stop formatting |
@@ -370,7 +369,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 ```
 handleStart() completes successfully
   │
-  └─→ handleFormatStart({ tabId: tab.id, text: resultText, sourceUrl: msg.url })
+  └─→ handleFormatStart({ tabId: tab.id, text: resultText })
         Calls TextKit /format (TextKit resolves the prompt internally)
         On success → stores fmtResult:{tabId}, broadcasts state:update
         On failure → broadcasts state:update with error (no translate)
@@ -434,7 +433,7 @@ No separate `autoFormat` wrapper exists — `handleStart()` calls `handleFormatS
 if (resultText) {
   await chrome.storage.local.set({ [`transcript_raw:${tab.id}`]: resultText });
   try {
-    await handleFormatStart({ tabId: tab.id, text: resultText, sourceUrl: msg.url });
+    await handleFormatStart({ tabId: tab.id, text: resultText });
   } catch (e) {
     console.error('auto-format failed:', e);
   }
@@ -573,7 +572,7 @@ The `buildBackendEndpoint` and `normalizeBackendSettings` functions are reused �
 
 The popup shows both backend settings. The existing Host/Port fields are for yt2txt. TextKit Host/Port fields are added. Both save to `chrome.storage.sync`.
 
-When sending `translate:start` messages, the popup normalizes the TextKit settings and passes `host`/`port` in the message. `format:start` does not include host/port — the background resolves them via `getTextkitEndpoint()`.
+Both `translate:start` and `format:start` do not include host/port — the background resolves the TextKit endpoint via `getTextkitEndpoint()`.
 
 ### TextKit backend discovery
 

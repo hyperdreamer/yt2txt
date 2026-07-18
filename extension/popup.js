@@ -665,18 +665,12 @@ async function doTranslation() {
   tl2Result.value = '';
   tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
 
-  const host = textkitHostInput.value.trim() || 'localhost';
-  const port = parseInt(textkitPortInput.value, 10) || 8765;
-
   try {
     await chrome.runtime.sendMessage({
       type: 'translate:start',
       tabId: currentTabId,
       text,
       language,
-      sourceUrl: urlInput.value,
-      host,
-      port,
     });
   } catch (e) {
     // sendMessage itself failed (SW terminated, context invalidated, etc.)

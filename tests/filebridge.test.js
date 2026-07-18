@@ -40,6 +40,7 @@ function createBackgroundHarness(options = {}) {
   const syncValues = { ...(options.syncValues || {}) };
   const localData = { ...(options.localData || {}) };
   const fetchCalls = [];
+  const runtimeMessages = [];
 
   const onStorageChanged = createEvent();
 
@@ -76,7 +77,7 @@ function createBackgroundHarness(options = {}) {
     },
     runtime: {
       onMessage: createEvent(),
-      sendMessage() { return Promise.resolve(); },
+      sendMessage(msg) { runtimeMessages.push(msg); return Promise.resolve(); },
       getPlatformInfo(cb) { if (cb) cb({}); }
     },
     offscreen: {
@@ -105,7 +106,10 @@ function createBackgroundHarness(options = {}) {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(BACKGROUND_PATH, 'utf8'), context, { filename: BACKGROUND_PATH });
 
-  return { context, fetchCalls, onStorageChanged, syncValues };
+  // Expose internal Maps via var aliases for tests.
+  vm.runInContext("var __states = states; var __translateControllers = translateControllers;", context);
+
+  return { context, fetchCalls, onStorageChanged, syncValues, localData, runtimeMessages };
 }
 
 // ── File Bridge save routing ──────────────────────────────────────
@@ -455,4 +459,90 @@ test('file bridge port is validated to be 1-65535', () => {
   // Valid
   const result = harness.context.normalizeBackendSettings('localhost', 8964);
   assert.equal(result.port, 8964);
+});
+
+// ── handleTranslateStop ──────────────────────────────────────
+
+test('handleTranslateStop aborts controller, removes storage key, resets state, sends tl2:false and state:update', async () => {
+  const harness = createBackgroundHarness();
+  const tabId = 42;
+
+  harness.context.__states.set(tabId, {
+    active: false,
+    status: 'Ready',
+    transcript: 'hello world',
+    translate: { active: true, status: 'Translating...', error: '', resultText: '', sourceText: 'test', targetLanguage: 'Chinese' }
+  });
+  const ctrl = new AbortController();
+  harness.context.__translateControllers.set(tabId, ctrl);
+  harness.localData['tl2Translating:42'] = true;
+
+  harness.context.handleTranslateStop(tabId);
+
+  // Controller deleted and aborted
+  assert.equal(harness.context.__translateControllers.has(tabId), false);
+  assert.equal(ctrl.signal.aborted, true);
+  // Storage key removed
+  assert.equal(harness.localData['tl2Translating:42'], undefined);
+  // State reset
+  const state = harness.context.__states.get(tabId);
+  assert.equal(state.translate.active, false);
+  assert.equal(state.translate.status, 'Translation stopped.');
+  assert.equal(state.translate.error, '');
+  // tl2:translating false sent
+  assert.ok(harness.runtimeMessages.some(m => m.type === 'tl2:translating' && m.tabId === tabId && m.value === false));
+  // state:update broadcast
+  assert.ok(harness.runtimeMessages.some(m => m.type === 'state:update' && m.tabId === tabId));
+});
+
+test('handleTranslateStop preserves unrelated transcript and format state', async () => {
+  const harness = createBackgroundHarness();
+  const tabId = 42;
+
+  harness.context.__states.set(tabId, {
+    active: false,
+    status: 'Ready',
+    transcript: 'hello world',
+    format: { active: false, status: 'Formatted', error: '', resultText: 'formatted text' },
+    translate: { active: true, status: 'Translating...', error: '', resultText: '' }
+  });
+  const ctrl = new AbortController();
+  harness.context.__translateControllers.set(tabId, ctrl);
+
+  harness.context.handleTranslateStop(tabId);
+
+  const state = harness.context.__states.get(tabId);
+  assert.equal(state.transcript, 'hello world');
+  assert.equal(state.format.resultText, 'formatted text');
+  assert.equal(state.format.status, 'Formatted');
+  assert.equal(state.format.active, false);
+  assert.equal(state.translate.active, false);
+  assert.equal(state.translate.status, 'Translation stopped.');
+});
+
+test('handleTranslateStop with no active translation does not throw or broadcast state:update', async () => {
+  const harness = createBackgroundHarness();
+  const tabId = 99;
+
+  harness.context.__states.set(tabId, {
+    active: false,
+    status: 'Ready',
+    transcript: '',
+    translate: { active: false, status: 'Ready', error: '', resultText: '' }
+  });
+
+  harness.context.handleTranslateStop(tabId);
+
+  // No state:update (translate was not active)
+  const updates = harness.runtimeMessages.filter(m => m.type === 'state:update' && m.tabId === tabId);
+  assert.equal(updates.length, 0);
+  // State unchanged
+  const state = harness.context.__states.get(tabId);
+  assert.equal(state.translate.active, false);
+  assert.equal(state.translate.status, 'Ready');
+});
+
+test('handleTranslateStop with no state at all does not throw', async () => {
+  const harness = createBackgroundHarness();
+  assert.doesNotThrow(() => { harness.context.handleTranslateStop(404); });
 });
