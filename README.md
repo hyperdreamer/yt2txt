@@ -10,12 +10,13 @@ Transcripts are cached in SQLite — instant return on repeat requests.
 
 ## Backends
 
-YT2TXT uses **two backends**:
+YT2TXT uses **three backends**:
 
 | Backend | Default Port | Purpose |
 |---------|-------------|---------|
 | **YT2TXT** | `8666` | Transcript extraction, caching |
-| **TextKit** | `8765` | Formatting, translation, save to disk |
+| **TextKit** | `8765` | Formatting, translation |
+| **File Bridge** | `8964` | Save to disk, path autocomplete |
 
 ## Prerequisites
 
@@ -25,6 +26,7 @@ YT2TXT uses **two backends**:
 - Chrome or Chromium browser
 - OpenAI-compatible API key (for transcription; free if video has subtitles)
 - [TextKit](https://github.com/hyperdreamer/textkit) backend (for Format and Translation tabs)
+- [File Bridge](https://github.com/hyperdreamer/file-bridge) backend (for Save and path autocomplete)
 
 ## Setup
 
@@ -68,6 +70,9 @@ cd backend && python main.py
 
 # Terminal 2 — TextKit backend (port 8765)
 # See textkit repo for setup
+
+# Terminal 3 — File Bridge backend (port 8964)
+# See file-bridge repo for setup
 ```
 
 ### 4. Load the extension

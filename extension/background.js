@@ -2,6 +2,7 @@
 const DEFAULT_HOST = 'localhost';
 const DEFAULT_PORT = 8666;
 const DEFAULT_TEXTKIT_PORT = 8765;
+const FILE_BRIDGE_DEFAULT_PORT = 8964;
 const BACKEND_TIMEOUT_MS = 12 * 60 * 1000; // 12 minutes (translation/format may be long)
 const TRANSCRIPT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 const LOCAL_BACKEND_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
@@ -37,6 +38,42 @@ async function getTextkitEndpoint(path) {
   }
   return _textkitBaseUrl + path;
 }
+
+// ── Backend URL cache (file-bridge) ──────────────────────────────
+let _fileBridgeBaseUrl = null;
+let _fileBridgeBaseUrlExpiry = 0;
+
+async function getFileBridgeEndpoint(path) {
+  if (!_fileBridgeBaseUrl || Date.now() > _fileBridgeBaseUrlExpiry) {
+    const items = await chrome.storage.sync.get({
+      fileBridgeHost: '',
+      fileBridgePort: FILE_BRIDGE_DEFAULT_PORT,
+    });
+    const hasFileBridgeHost = String(items.fileBridgeHost || '').trim().length > 0;
+    const host = hasFileBridgeHost ? items.fileBridgeHost : DEFAULT_HOST;
+    const port = items.fileBridgePort || FILE_BRIDGE_DEFAULT_PORT;
+    _fileBridgeBaseUrl = buildBackendEndpoint(host, port, '');
+    _fileBridgeBaseUrlExpiry = Date.now() + 60_000;
+  }
+  return _fileBridgeBaseUrl + path;
+}
+
+// ── Storage change listener (cache invalidation) ──────────────────
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'sync') return;
+  if (changes.yt2txtHost || changes.yt2txtPort) {
+    _yt2txtBaseUrl = null;
+    _yt2txtBaseUrlExpiry = 0;
+  }
+  if (changes.textkitHost || changes.textkitPort) {
+    _textkitBaseUrl = null;
+    _textkitBaseUrlExpiry = 0;
+  }
+  if (changes.fileBridgeHost || changes.fileBridgePort) {
+    _fileBridgeBaseUrl = null;
+    _fileBridgeBaseUrlExpiry = 0;
+  }
+});
 
 // Backward-compatible alias for the original single-backend helper.
 const getBackendEndpoint = getYt2txtEndpoint;
@@ -548,14 +585,28 @@ function handleTranslateStop(tabId) {
 async function handleSaveTranslation(msg) {
   const { text, path } = msg;
   if (!text || !path) return { ok: false, error: 'Missing text or path' };
-  const url = await getTextkitEndpoint('/save');
+  const url = await getFileBridgeEndpoint('/save');
   const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, path }),
   });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.error) return { ok: false, error: payload.error || `HTTP ${response.status}` };
+  let payload = null;
+  try {
+    const raw = await response.text();
+    if (raw.trim()) payload = JSON.parse(raw);
+  } catch {
+    // JSON parse failure — payload stays null
+  }
+  if (!response.ok) {
+    return { ok: false, error: (payload && (payload.error || payload.detail)) || `HTTP ${response.status}` };
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { ok: false, error: 'File bridge returned an invalid or empty response.' };
+  }
+  if (payload.success !== true) {
+    return { ok: false, error: payload.error || payload.detail || 'File bridge save was not acknowledged.' };
+  }
   return { ok: true, path: payload.path || path };
 }
 

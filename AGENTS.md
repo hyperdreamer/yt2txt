@@ -25,12 +25,13 @@ backend/                 ← FastAPI backend (transcript extraction only)
   start.sh               ← convenience launcher
 ```
 
-## Two backends
+## Three backends
 
 | Backend | Default Port | Purpose |
 |---------|-------------|---------|
 | YT2TXT | 8666 | Transcript extraction, caching |
-| TextKit | 8765 | Formatting, translation, save to disk, prompt management |
+| TextKit | 8765 | Formatting, translation |
+| File Bridge | 8964 | Save to disk, path autocomplete |
 
 Popup shows backend settings behind a ⚙ gear icon. TextKit host auto-fills from YT2TXT host when empty.
 
@@ -54,8 +55,10 @@ Popup shows backend settings behind a ⚙ gear icon. TextKit host auto-fills fro
 - keepAlive prevents SW termination during long operations.
 
 ### Backend communication
-- Two cached URL builders: `getYt2txtEndpoint()` (port 8666) and `getTextkitEndpoint()` (port 8765), each with 60-second cache expiry.
-- Both use shared `buildBackendEndpoint()` + `normalizeBackendSettings()`.
+- Three cached URL builders: `getYt2txtEndpoint()` (port 8666), `getTextkitEndpoint()` (port 8765), and `getFileBridgeEndpoint()` (port 8964), each with 60-second cache expiry.
+- All use shared `buildBackendEndpoint()` + `normalizeBackendSettings()`.
+- File Bridge host defaults to blank (meaning localhost); blank host is resolved to `DEFAULT_HOST` (localhost) with the configured File Bridge port.
+- Cache invalidation via `chrome.storage.onChanged` — each backend's cache is invalidated independently when its settings change.
 - Cache-busting: `?_=Date.now()` on every fetch.
 - Read from chrome.storage.sync at request time (not startup).
 
@@ -69,6 +72,7 @@ Transcript completes → auto-format fires
 - Auto-format always fires after transcript (unconditional).
 - Auto-translate fires after format (conditional on checkbox).
 - All auto-actions use offscreen document for clipboard + notifications for user feedback.
+- Save and path autocomplete route through File Bridge, not TextKit.
 - Results persist to chrome.storage.local so popup reopen restores them.
 
 ## Backend endpoints

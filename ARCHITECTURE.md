@@ -2,7 +2,7 @@
 
 ## Overview
 
-Add two new tabs (Format, Translation) alongside the existing Transcript tab in the YT2TXT Chrome extension. The Format and Translation operations delegate to the **TextKit backend** (port 8765), while the existing Transcript extraction continues using the **YT2TXT backend** (port 8666). All API calls go through the background service worker — the popup never calls `fetch()` directly.
+Add two new tabs (Format, Translation) alongside the existing Transcript tab in the YT2TXT Chrome extension. The Format and Translation operations delegate to the **TextKit backend** (port 8765), the existing Transcript extraction continues using the **YT2TXT backend** (port 8666), and all save/path-autocomplete operations route through **File Bridge** (port 8964). All API calls go through the background service worker — the popup never calls `fetch()` directly except for lightweight path-autocomplete queries.
 
 ### Tab order (yt2txt-specific)
 
@@ -75,7 +75,8 @@ popup.html
 │
 └── .backend-settings (collapsible, at bottom)
     ├── label "YT2TXT" Host/Port (existing, port 8666)
-    └── label "TextKit" Host/Port (NEW, port 8765)
+    ├── label "TextKit" Host/Port (NEW, port 8765)
+    └── label "File Bridge" Host/Port (NEW, port 8964)
 ```
 
 ### Design decision: Prompt placement (delegated to TextKit)
@@ -191,9 +192,10 @@ User clicks "Save" on Translation or Format tab
         TextKit does the same. The endpoint /save is the same regardless.)
 
   → background.js: handleSaveTranslation(msg)  // reused name from TextKit
-    1. Build URL: http://{textkitHost}:{textkitPort}/save
+    1. Build URL via getFileBridgeEndpoint('/save') → http://{fileBridgeHost}:{fileBridgePort}/save
     2. POST { text, path }
-    3. Return { ok: true, path } or { ok: false, error }
+    3. Parse response: require HTTP 200-299 AND success === true
+    4. Return { ok: true, path } or { ok: false, error }
 
   → popup.js: on success
     - Show "Saved!" on button (1500ms)
@@ -294,6 +296,8 @@ Extend the existing `states` Map to include new fields:
 | `yt2txtPort` | number | `8666` | YT2TXT backend port (existing) |
 | `textkitHost` | string | `'localhost'` | **NEW** TextKit backend host |
 | `textkitPort` | number | `8765` | **NEW** TextKit backend port |
+| `fileBridgeHost` | string | `''` | **NEW** File Bridge host (blank = localhost) |
+| `fileBridgePort` | number | `8964` | **NEW** File Bridge port |
 | `tl2AutoCopy` | boolean | `false` | **NEW** Auto-copy translation |
 | `tl2AutoSave` | boolean | `false` | **NEW** Auto-save translation |
 | `tl2AutoSavePath` | string | `''` | **NEW** Save path for translation auto-save |
@@ -479,14 +483,15 @@ fmtResult:${tabId}           string   (format result)
 
 ## 7. Backend URL Resolution for Two Backends
 
-YT2TXT uses **two distinct backends**:
+YT2TXT uses **three distinct backends**:
 
 | Backend | Default Port | Purpose | Config Keys |
 |---------|-------------|---------|-------------|
 | YT2TXT | 8666 | Transcript extraction (`/transcript`) | `yt2txtHost`, `yt2txtPort` |
-| TextKit | 8765 | Format (`/format`), Translate (`/translate`), Save (`/save`), Prompt management (`/prompts/*`) | `textkitHost`, `textkitPort` |
+| TextKit | 8765 | Format (`/format`), Translate (`/translate`) | `textkitHost`, `textkitPort` |
+| File Bridge | 8964 | Save (`/save`), Path autocomplete (`/paths`) | `fileBridgeHost`, `fileBridgePort` |
 
-### Background.js: two cached URL builders
+### Background.js: three cached URL builders
 
 ```javascript
 let _yt2txtBaseUrl = null;
@@ -520,7 +525,46 @@ async function getTextkitEndpoint(path) {
 }
 ```
 
-The `buildBackendEndpoint` and `normalizeBackendSettings` functions are reused — they don't care about the port, and the host validation (localhost-only) is the same for both backends.
+### Background.js: File Bridge endpoint cache
+
+```javascript
+const FILE_BRIDGE_DEFAULT_PORT = 8964;
+
+let _fileBridgeBaseUrl = null;
+let _fileBridgeBaseUrlExpiry = 0;
+
+async function getFileBridgeEndpoint(path) {
+  if (!_fileBridgeBaseUrl || Date.now() > _fileBridgeBaseUrlExpiry) {
+    const items = await chrome.storage.sync.get({
+      fileBridgeHost: '',
+      fileBridgePort: FILE_BRIDGE_DEFAULT_PORT,
+    });
+    const hasFileBridgeHost = String(items.fileBridgeHost || '').trim().length > 0;
+    const host = hasFileBridgeHost ? items.fileBridgeHost : DEFAULT_HOST;
+    const port = items.fileBridgePort || FILE_BRIDGE_DEFAULT_PORT;
+    _fileBridgeBaseUrl = buildBackendEndpoint(host, port, '');
+    _fileBridgeBaseUrlExpiry = Date.now() + 60_000;
+  }
+  return _fileBridgeBaseUrl + path;
+}
+```
+
+The File Bridge host defaults to blank (meaning localhost). Changing `fileBridgeHost` or `fileBridgePort` in sync storage invalidates only the File Bridge cache via `chrome.storage.onChanged`.
+
+#### Cache invalidation
+
+```javascript
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'sync') return;
+  if (changes.fileBridgeHost || changes.fileBridgePort) {
+    _fileBridgeBaseUrl = null;
+    _fileBridgeBaseUrlExpiry = 0;
+  }
+  // ... similar for yt2txt and textkit caches
+});
+```
+
+The `buildBackendEndpoint` and `normalizeBackendSettings` functions are reused — they don't care about the port, and the host validation (localhost-only) is the same for all three backends.
 
 ### Popup.js: settings UI
 
