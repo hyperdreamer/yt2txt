@@ -206,7 +206,7 @@ User clicks "Save" on Translation or Format tab
 
 Copy uses `navigator.clipboard.writeText()` in the popup (popup has focus, so this works). For auto-copy from background (popup closed), the offscreen document pattern is used (see section 2.5).
 
-Download uses `chrome.downloads.download()` with a blob URL, same as existing transcript download.
+Download creates a Blob from the text, builds an object URL via `URL.createObjectURL()`, clicks a temporary anchor element to trigger the download, then revokes the URL with `URL.revokeObjectURL()`.
 
 ### 2.5 Offscreen clipboard (for auto-copy from background)
 
@@ -286,7 +286,7 @@ Extend the existing `states` Map to include new fields:
 
 ### 3.3 chrome.storage.local keys (global, not per-tab)
 
-*(None — path autocomplete fetches suggestions from TextKit `/paths` endpoint.)*
+*(None — path autocomplete fetches suggestions from File Bridge `/paths` endpoint.)*
 
 ### 3.4 chrome.storage.sync keys (persisted across devices)
 
@@ -458,6 +458,9 @@ tl2AutoCopy         boolean  false       (NEW)
 tl2AutoSave         boolean  false       (NEW)
 tl2AutoSavePath     string   ""          (NEW)
 yt2txtAutoTranslate boolean  false       (NEW)
+fileBridgeHost      string   ""          (NEW)
+fileBridgePort      number   8964        (NEW)
+tl2Language         string   "original"  (NEW)
 fmtAutoCopy         boolean  false       (NEW)
 fmtAutoSave         boolean  false       (NEW)
 fmtAutoSavePath     string   ""          (NEW)
@@ -466,7 +469,7 @@ fmtAutoSavePath     string   ""          (NEW)
 ### chrome.storage.local (global)
 
 ```
-(none — prompts live in TextKit, path autocomplete fetches from TextKit /paths)
+(none — prompts live in TextKit, path autocomplete fetches from File Bridge /paths)
 ```
 
 ### chrome.storage.local (per-tab, suffixed with `:${tabId}`)
@@ -695,7 +698,7 @@ popup.js init()
      - tl2Translating:{tabId} → restore "Stop" button if was translating
   7. Load format tab state:
      - fmtResult:{tabId} → fill textarea, enable buttons
-  8. Load path suggestions from TextKit backend /paths
+  8. Load path suggestions from File Bridge backend /paths
   9. Update all button states
 ```
 

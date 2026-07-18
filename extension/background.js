@@ -417,7 +417,7 @@ async function handleStart(msg) {
     // Cache original transcript before formatting (for retry on format failure)
     await chrome.storage.local.set({ [`transcript_raw:${tab.id}`]: resultText });
     try {
-      await handleFormatStart({ tabId: tab.id, text: resultText, sourceUrl: msg.url });
+      await handleFormatStart({ tabId: tab.id, text: resultText });
     } catch (e) {
       console.error('auto-format failed:', e);
     }
@@ -668,7 +668,7 @@ async function handleFormatStart(msg) {
       try { await fmtAutoCopyIfEnabled(formatted); } catch (e) { console.error('auto-copy fmt failed:', e); }
       try { await fmtAutoSaveIfEnabled(tabId, formatted); } catch (e) { console.error('auto-save fmt failed:', e); }
       // Auto-translate: format completion triggers translation (if enabled).
-      try { await autoTranslate(tabId, formatted, msg.sourceUrl); } catch (e) { console.error('autoTranslate from format failed:', e); }
+      try { await autoTranslate(tabId, formatted); } catch (e) { console.error('autoTranslate from format failed:', e); }
     }
   } catch (e) {
     if (e.name === 'AbortError') {
@@ -810,7 +810,7 @@ async function fmtAutoSaveIfEnabled(tabId, text) {
 }
 
 // ── Auto-translate helper (called from format completion) ─────
-async function autoTranslate(tabId, text, sourceUrl) {
+async function autoTranslate(tabId, text) {
   const { yt2txtAutoTranslate } = await chrome.storage.sync.get({
     yt2txtAutoTranslate: false,
   });
@@ -832,7 +832,6 @@ async function autoTranslate(tabId, text, sourceUrl) {
     tabId,
     text,
     language,
-    sourceUrl,
     host: backend.textkitHost,
     port: backend.textkitPort,
   }).catch((e) => console.error('autoTranslate failed:', e));

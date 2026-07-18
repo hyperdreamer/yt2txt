@@ -39,7 +39,7 @@ Popup shows backend settings behind a ⚙ gear icon. TextKit host auto-fills fro
 
 ### Message-passing architecture
 - The popup NEVER calls fetch() directly for operations — it always delegates to the background service worker via chrome.runtime.sendMessage.
-- **Exception**: lightweight path-autocomplete fetches (to TextKit `/paths`) use direct `_popupFetch()` from popup with 10s timeout. These are low-stakes, read-only, and benefit from lower latency.
+- **Exception**: lightweight path-autocomplete fetches (to File Bridge `/paths`) use direct `_popupFetch()` from popup with 10s timeout. These are low-stakes, read-only, and benefit from lower latency.
 - Background handles all transcript, format, translate, and save API calls.
 - Popup sends `{ type: 'popup:get-state' }` on init to sync state from background.
 - Popup sends `{ type: 'popup:start' }` to begin transcript extraction.
