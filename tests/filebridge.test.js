@@ -125,7 +125,7 @@ test('handleSaveTranslation uses File Bridge endpoint, not TextKit', async () =>
     },
     fetch: async (url) => {
       fetchedUrl = String(url);
-      return { ok: true, text: async () => JSON.stringify({ success: true, path: 'saved/file.txt' }) };
+      return { ok: true, text: async () => JSON.stringify({ ok: true, path: 'saved/file.txt' }) };
     }
   });
 
@@ -148,7 +148,7 @@ test('handleSaveTranslation uses configured File Bridge host and port', async ()
     syncValues: { fileBridgeHost: '127.0.0.1', fileBridgePort: 9777 },
     fetch: async (url) => {
       fetchedUrl = String(url);
-      return { ok: true, text: async () => JSON.stringify({ success: true }) };
+      return { ok: true, text: async () => JSON.stringify({ ok: true }) };
     }
   });
 
@@ -167,7 +167,7 @@ test('blank File Bridge host defaults to localhost with configured port', async 
     },
     fetch: async (url) => {
       fetchedUrl = String(url);
-      return { ok: true, text: async () => JSON.stringify({ success: true }) };
+      return { ok: true, text: async () => JSON.stringify({ ok: true }) };
     }
   });
 
@@ -188,7 +188,7 @@ test('changing fileBridge settings invalidates File Bridge cache only', async ()
     },
     fetch: async (url) => {
       fetchedUrl = String(url);
-      return { ok: true, text: async () => JSON.stringify({ success: true }) };
+      return { ok: true, text: async () => JSON.stringify({ ok: true }) };
     }
   });
 
@@ -220,7 +220,7 @@ test('changing textkit settings does not invalidate File Bridge cache', async ()
     },
     fetch: async (url) => {
       fetchedUrl = String(url);
-      return { ok: true, text: async () => JSON.stringify({ success: true }) };
+      return { ok: true, text: async () => JSON.stringify({ ok: true }) };
     }
   });
 
@@ -242,12 +242,12 @@ test('changing textkit settings does not invalidate File Bridge cache', async ()
 
 // ── File Bridge response contract ─────────────────────────────────
 
-test('save requires success === true, not just HTTP 200', async () => {
+test('save requires ok === true, not just HTTP 200', async () => {
   const harness = createBackgroundHarness({
     fetch: async () => ({
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({ success: false, error: 'disk full' })
+      text: async () => JSON.stringify({ ok: false, error: 'disk full' })
     })
   });
 
@@ -259,7 +259,7 @@ test('save requires success === true, not just HTTP 200', async () => {
   assert.equal(result.error, 'disk full');
 });
 
-test('save rejects implicit success — requires explicit success === true', async () => {
+test('save rejects implicit success — requires explicit ok === true', async () => {
   const harness = createBackgroundHarness({
     fetch: async () => ({
       ok: true,
@@ -358,7 +358,7 @@ test('save returns the path from the response when present', async () => {
   const harness = createBackgroundHarness({
     fetch: async () => ({
       ok: true,
-      text: async () => JSON.stringify({ success: true, path: '/home/user/save_root/notes/out.txt' })
+      text: async () => JSON.stringify({ ok: true, path: '/home/user/save_root/notes/out.txt' })
     })
   });
 
@@ -374,7 +374,7 @@ test('save falls back to input path when response has no path', async () => {
   const harness = createBackgroundHarness({
     fetch: async () => ({
       ok: true,
-      text: async () => JSON.stringify({ success: true })
+      text: async () => JSON.stringify({ ok: true })
     })
   });
 

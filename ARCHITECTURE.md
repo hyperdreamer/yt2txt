@@ -193,7 +193,7 @@ User clicks "Save" on Translation or Format tab
   → background.js: handleSaveTranslation(msg)  // reused name from TextKit
     1. Build URL via getFileBridgeEndpoint('/save') → http://{fileBridgeHost}:{fileBridgePort}/save
     2. POST { text, path }
-    3. Parse response: require HTTP 200-299 AND success === true
+    3. Parse response: require HTTP 200-299 AND ok === true
     4. Return { ok: true, path } or { ok: false, error }
 
   → popup.js: on success

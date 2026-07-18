@@ -614,7 +614,7 @@ async function handleSaveTranslation(msg) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return { ok: false, error: 'File bridge returned an invalid or empty response.' };
   }
-  if (payload.success !== true) {
+  if (payload.ok !== true) {
     return { ok: false, error: payload.error || payload.detail || 'File bridge save was not acknowledged.' };
   }
   return { ok: true, path: payload.path || path };
