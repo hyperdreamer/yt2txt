@@ -122,14 +122,10 @@ User clicks "Translate" in popup
     11. On abort (user Stop):
         - Update state.translate.status = "Translation stopped."
         - Return { ok: true }
-    12. On timeout (AbortError + timedOut):
-        - Update state.translate.error = "Translation timed out."
-        - Broadcast error
-    13. On fetch error:
+    12. On fetch error:
         - Update state.translate.error = error message
         - Broadcast error
-    14. Finally:
-        - Clear timeout
+    13. Finally:
         - Remove controller from translateControllers
         - Remove tl2Translating:{tabId}
         - Broadcast { type: 'tl2:translating', tabId, value: false }
@@ -172,8 +168,8 @@ User clicks "Format" in popup
         - Broadcast state:update
         - If text: fmtAutoCopyIfEnabled(text), fmtAutoSaveIfEnabled(text)
         - Trigger autoTranslate if enabled
-    10. On abort/timeout/error: update state.format.error/status, broadcast state:update
-    11. Finally: clear timeout, remove controller, stopKeepAlive if idle
+    10. On abort/error: update state.format.error/status, broadcast state:update
+    11. Finally: remove controller, stopKeepAlive if idle
 
   → popup.js: receives state:update → renderState() updates format tab from state.format
 ```
@@ -594,9 +590,8 @@ if (!items.textkitHost) items.textkitHost = items.yt2txtHost;
 ### 8.1 Network errors
 
 - All `fetch()` calls in background.js are wrapped in try/catch
-- `AbortError` is handled specially: check `timedOut` flag to distinguish user stop vs timeout
+- `AbortError` indicates user-initiated stop (backend may also abort).
 - User stop: store status message, return `{ ok: true }` (not an error)
-- Timeout: store error status, broadcast error to popup, return `{ ok: false, error }`
 - Other fetch errors: store error message, broadcast to popup
 
 ### 8.2 Empty results

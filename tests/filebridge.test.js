@@ -100,14 +100,14 @@ function createBackgroundHarness(options = {}) {
       return options.fetch ? options.fetch(url, ...args) : fetch(url, ...args);
     },
     setInterval: () => 1,
-    setTimeout
+    setTimeout: options.setTimeout || setTimeout
   };
   context.globalThis = context;
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(BACKGROUND_PATH, 'utf8'), context, { filename: BACKGROUND_PATH });
 
   // Expose internal Maps via var aliases for tests.
-  vm.runInContext("var __states = states; var __translateControllers = translateControllers;", context);
+  vm.runInContext("var __states = states; var __translateControllers = translateControllers; var __formatControllers = formatControllers;", context);
 
   return { context, fetchCalls, onStorageChanged, syncValues, localData, runtimeMessages };
 }
@@ -545,4 +545,94 @@ test('handleTranslateStop with no active translation does not throw or broadcast
 test('handleTranslateStop with no state at all does not throw', async () => {
   const harness = createBackgroundHarness();
   assert.doesNotThrow(() => { harness.context.handleTranslateStop(404); });
+});
+
+test('translation has no fixed timeout — Stop still aborts via AbortController', async () => {
+  const scheduledTimeouts = [];
+  const harness = createBackgroundHarness({
+    setTimeout: (callback, delay, ...args) => {
+      scheduledTimeouts.push(delay);
+      return setTimeout(callback, delay, ...args);
+    },
+    fetch: (_url, options) => new Promise((_resolve, reject) => {
+      const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+      if (options.signal.aborted) abort();
+      else options.signal.addEventListener('abort', abort, { once: true });
+    })
+  });
+
+  const operation = harness.context.handleTranslateStart({
+    tabId: 1,
+    text: 'source',
+    language: 'French'
+  });
+
+  await waitFor(
+    () => harness.context.__translateControllers.has(1)
+      && harness.context.__states.get(1)?.translate?.active,
+    'translation did not become active'
+  );
+
+  assert.equal(
+    scheduledTimeouts.includes(12 * 60 * 1000),
+    false,
+    'translation must not schedule the fixed backend timeout'
+  );
+  assert.equal(
+    harness.context.__translateControllers.has(1),
+    true,
+    'translate controller should still be registered (no fixed timeout fired)'
+  );
+
+  // Stop via user path — must still work.
+  harness.context.handleTranslateStop(1);
+
+  const result = await operation;
+  assert.equal(result.ok, true);
+  const state = harness.context.__states.get(1);
+  assert.equal(state.translate.status, 'Translation stopped.');
+});
+
+test('format has no fixed timeout — Stop still aborts via AbortController', async () => {
+  const scheduledTimeouts = [];
+  const harness = createBackgroundHarness({
+    setTimeout: (callback, delay, ...args) => {
+      scheduledTimeouts.push(delay);
+      return setTimeout(callback, delay, ...args);
+    },
+    fetch: (_url, options) => new Promise((_resolve, reject) => {
+      const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+      if (options.signal.aborted) abort();
+      else options.signal.addEventListener('abort', abort, { once: true });
+    })
+  });
+
+  const operation = harness.context.handleFormatStart({
+    tabId: 1,
+    text: 'source'
+  });
+
+  await waitFor(
+    () => harness.context.__formatControllers.has(1),
+    'format controller was not registered'
+  );
+
+  assert.equal(
+    scheduledTimeouts.includes(12 * 60 * 1000),
+    false,
+    'format must not schedule the fixed backend timeout'
+  );
+  assert.equal(
+    harness.context.__formatControllers.has(1),
+    true,
+    'format controller should still be registered (no fixed timeout fired)'
+  );
+
+  // Stop via user path — must still work.
+  harness.context.handleFormatStop(1);
+
+  const result = await operation;
+  assert.equal(result.ok, true);
+  const state = harness.context.__states.get(1);
+  assert.equal(state.format.status, 'Formatting stopped.');
 });

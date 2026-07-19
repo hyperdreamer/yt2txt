@@ -3,7 +3,7 @@ const DEFAULT_HOST = 'localhost';
 const DEFAULT_PORT = 8666;
 const DEFAULT_TEXTKIT_PORT = 8765;
 const FILE_BRIDGE_DEFAULT_PORT = 8964;
-const BACKEND_TIMEOUT_MS = 12 * 60 * 1000; // 12 minutes (translation/format may be long)
+const BACKEND_TIMEOUT_MS = 12 * 60 * 1000;
 const TRANSCRIPT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 const LOCAL_BACKEND_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
@@ -454,16 +454,10 @@ async function handleTranslateStart(msg) {
   handleTranslateStop(tabId);
 
   const controller = new AbortController();
-  let timedOut = false;
-  let timeoutId = null;
 
   try {
     translateControllers.set(tabId, controller);
     startKeepAlive();
-    timeoutId = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, BACKEND_TIMEOUT_MS);
 
     // Persist state so popup reopen shows "Stop" button.
     await chrome.storage.local.set({
@@ -532,18 +526,7 @@ async function handleTranslateStart(msg) {
       if (translated) autoSaveIfEnabled(translated);
     } catch (e) {
       if (e.name === 'AbortError') {
-        const message = timedOut ? 'Translation timed out.' : 'Translation stopped.';
-        if (timedOut) {
-          const state = getState(tabId);
-          state.translate.error = message;
-          state.translate.status = message;
-          state.translate.active = false;
-          broadcastState(tabId);
-          chrome.runtime
-            .sendMessage({ type: 'translation:update', tabId, text: '', error: message })
-            .catch(() => {});
-        }
-        return { ok: !timedOut, error: timedOut ? message : undefined };
+        return { ok: true };
       }
       const errorMessage = e.message || 'Translation failed.';
       const state = getState(tabId);
@@ -557,7 +540,6 @@ async function handleTranslateStart(msg) {
       return { ok: false, error: errorMessage };
     }
   } finally {
-    clearTimeout(timeoutId);
     if (translateControllers.get(tabId) === controller) {
       translateControllers.delete(tabId);
       chrome.storage.local.remove(`tl2Translating:${tabId}`);
@@ -632,11 +614,6 @@ async function handleFormatStart(msg) {
   if (existing) existing.abort();
 
   const controller = new AbortController();
-  let timedOut = false;
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, BACKEND_TIMEOUT_MS);
 
   formatControllers.set(tabId, controller);
   startKeepAlive();
@@ -682,9 +659,7 @@ async function handleFormatStart(msg) {
     }
   } catch (e) {
     if (e.name === 'AbortError') {
-      state.format.error = timedOut
-        ? 'Formatting timed out.'
-        : 'Formatting stopped.';
+      state.format.error = 'Formatting stopped.';
     } else {
       state.format.error = e.message || 'Formatting failed.';
     }
@@ -692,7 +667,6 @@ async function handleFormatStart(msg) {
     state.format.active = false;
     broadcastState(tabId);
   } finally {
-    clearTimeout(timeoutId);
     if (formatControllers.get(tabId) === controller) {
       formatControllers.delete(tabId);
     }
