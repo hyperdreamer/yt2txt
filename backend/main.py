@@ -34,6 +34,10 @@ CONFIG_PATH = Path(__file__).with_name("config.yaml")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8666
 DEFAULT_MODEL = "gpt-4o-transcribe"
+DEFAULT_TIMEOUT_CONNECT = 10.0
+DEFAULT_TIMEOUT_READ = 600.0
+DEFAULT_TIMEOUT_WRITE = 60.0
+DEFAULT_TIMEOUT_POOL = 10.0
 PRODUCTION = not (
     os.environ.get("YT2TXT_DEBUG") or os.environ.get("FLASK_DEBUG")
 )
@@ -51,6 +55,16 @@ def _load_yaml_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
+class TimeoutConfig:
+    """Per-phase AI provider timeouts, in seconds."""
+
+    connect: float = DEFAULT_TIMEOUT_CONNECT
+    read: float = DEFAULT_TIMEOUT_READ
+    write: float = DEFAULT_TIMEOUT_WRITE
+    pool: float = DEFAULT_TIMEOUT_POOL
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Application settings loaded from YAML and environment variables."""
 
@@ -60,8 +74,61 @@ class AppConfig:
     api_base: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = DEFAULT_MODEL
+    timeout: TimeoutConfig = TimeoutConfig()
     cache_enabled: bool = True
     cache_ttl_days: int = 30
+
+
+TIMEOUT_RANGES: dict[str, tuple[float, float]] = {
+    'connect': (0.0, 300.0),
+    'read': (0.0, 3600.0),
+    'write': (0.0, 600.0),
+    'pool': (0.0, 300.0),
+}
+
+
+def _parse_timeout_config(raw_timeout: Any) -> TimeoutConfig:
+    """Parse and validate ai.timeout section from YAML.
+
+    Accepts a dict with optional numeric keys.  Missing keys get defaults.
+    Values must be >0 and within allowed ranges (same as TextKit).
+    Raises RuntimeError for invalid values.
+    """
+    if raw_timeout is None:
+        return TimeoutConfig()
+    if not isinstance(raw_timeout, dict):
+        raise RuntimeError("ai.timeout must be a mapping")
+
+    unknown = set(raw_timeout) - set(TIMEOUT_RANGES)
+    if unknown:
+        names = ", ".join(sorted(map(str, unknown)))
+        raise RuntimeError(f"Unknown ai.timeout setting(s): {names}")
+
+    values: dict[str, float] = {}
+    for key, (low, high) in TIMEOUT_RANGES.items():
+        if key not in raw_timeout:
+            continue
+        raw = raw_timeout[key]
+        if isinstance(raw, bool):
+            raise RuntimeError(f"ai.timeout.{key} must be a number, got bool")
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                f'ai.timeout.{key} must be a number, got {type(raw).__name__}'
+            ) from None
+        if not (low < val <= high):
+            raise RuntimeError(
+                f'ai.timeout.{key} must be > {low} and <= {high}, got {val}'
+            )
+        values[key] = val
+
+    return TimeoutConfig(
+        connect=values.get('connect', DEFAULT_TIMEOUT_CONNECT),
+        read=values.get('read', DEFAULT_TIMEOUT_READ),
+        write=values.get('write', DEFAULT_TIMEOUT_WRITE),
+        pool=values.get('pool', DEFAULT_TIMEOUT_POOL),
+    )
 
 
 def load_config() -> AppConfig:
@@ -101,6 +168,7 @@ def load_config() -> AppConfig:
         api_base=api_base,
         api_key=api_key,
         model=model,
+        timeout=_parse_timeout_config(ai_section.get("timeout")),
         cache_enabled=bool(cache_section.get("enabled", True)),
         cache_ttl_days=int(cache_section.get("ttl_days", 30)),
     )
@@ -428,14 +496,18 @@ async def _transcribe_file(
         "Content-Type": f"multipart/form-data; boundary={boundary}",
     }
 
-    deadline = 300  # 5 min per chunk
+    timeout_cfg = config.timeout
+    deadline = timeout_cfg.read + 60  # buffer beyond read timeout
 
     last_exc: Exception | None = None
     for attempt in (1, 2):
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(
-                    connect=10.0, read=deadline, write=60.0, pool=10.0
+                    connect=timeout_cfg.connect,
+                    read=timeout_cfg.read,
+                    write=timeout_cfg.write,
+                    pool=timeout_cfg.pool,
                 )
             ) as client:
                 response = await asyncio.wait_for(

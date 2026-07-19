@@ -51,6 +51,14 @@ ai:
   api_base: "https://api.openai.com"
   model: "gpt-4o-transcribe"   # or gpt-4o-min-transcribe
 
+  # Per-phase HTTP timeouts for the transcription API (all in seconds).
+  # Omit to use defaults: connect=10, read=600, write=60, pool=10.
+  # timeout:
+  #   connect: 10
+  #   read: 600
+  #   write: 60
+  #   pool: 10
+
 cache:
   enabled: true
   ttl_days: 30
