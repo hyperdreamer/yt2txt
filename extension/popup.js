@@ -59,6 +59,34 @@ const tl2PathSuggestions = document.getElementById('tl2-path-suggestions');
 const textkitHostInput = document.getElementById('textkit-host');
 const textkitPortInput = document.getElementById('textkit-port');
 
+// ── File Bridge backend elements ──────────────────────────────
+const fileBridgeHostInput = document.getElementById('file-bridge-host');
+const fileBridgePortInput = document.getElementById('file-bridge-port');
+const FILE_BRIDGE_DEFAULT_PORT = 8964;
+const LOCAL_BACKEND_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
+// ── File Bridge shared helpers ─────────────────────────────────
+function readFileBridgeSettings() {
+  let rawHost = fileBridgeHostInput.value.trim();
+  if (/^https?:\/\//i.test(rawHost)) rawHost = new URL(rawHost).hostname;
+  const host = rawHost || 'localhost';
+  const rawPort = parseInt(fileBridgePortInput.value, 10);
+  const port = (Number.isInteger(rawPort) && rawPort >= 1 && rawPort <= 65535)
+    ? rawPort : FILE_BRIDGE_DEFAULT_PORT;
+  return { host, port };
+}
+
+function validateFileBridgeSettings(host, port) {
+  let normalized = String(host || 'localhost').toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  if (!LOCAL_BACKEND_HOSTS.has(normalized)) {
+    return { valid: false, error: 'File Bridge host must be localhost, 127.0.0.1, or ::1.' };
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return { valid: false, error: 'File Bridge port must be between 1 and 65535.' };
+  }
+  return { valid: true, host: normalized === '::1' ? '[::1]' : normalized, port };
+}
+
 // ── State ──────────────────────────────────────────────────────
 let latestState = null;
 let currentTabId = null;
@@ -136,6 +164,10 @@ tl2AutosavePath.addEventListener('input', () => {
 textkitHostInput.addEventListener('change', saveTextkitBackend);
 textkitPortInput.addEventListener('change', saveTextkitBackend);
 
+// File Bridge backend
+fileBridgeHostInput.addEventListener('change', saveFileBridgeSettings);
+fileBridgePortInput.addEventListener('change', saveFileBridgeSettings);
+
 // ── Background messages ───────────────────────────────────────
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'state:update') {
@@ -193,6 +225,8 @@ async function init() {
     yt2txtPort: 8666,
     textkitHost: '',
     textkitPort: 8765,
+    fileBridgeHost: '',
+    fileBridgePort: FILE_BRIDGE_DEFAULT_PORT,
     tl2AutoCopy: false,
     tl2AutoSave: false,
     tl2AutoSavePath: '',
@@ -206,6 +240,8 @@ async function init() {
   portInput.value = items.yt2txtPort;
   textkitHostInput.value = items.textkitHost;
   textkitPortInput.value = items.textkitPort;
+  fileBridgeHostInput.value = items.fileBridgeHost || '';
+  fileBridgePortInput.value = items.fileBridgePort || FILE_BRIDGE_DEFAULT_PORT;
 
   tl2AutocopyCheckbox.checked = items.tl2AutoCopy;
   tl2AutosaveCheckbox.checked = items.tl2AutoSave;
@@ -310,6 +346,21 @@ function saveTextkitBackend() {
   });
 }
 
+function saveFileBridgeSettings() {
+  const rawHost = fileBridgeHostInput.value.trim();
+  const rawPort = parseInt(fileBridgePortInput.value, 10);
+  const validation = validateFileBridgeSettings(rawHost, rawPort);
+  if (!validation.valid) {
+    statusBar.textContent = validation.error;
+    statusBar.className = 'status-bar error';
+    return;
+  }
+  chrome.storage.sync.set({
+    fileBridgeHost: validation.host,
+    fileBridgePort: validation.port,
+  });
+}
+
 function saveTl2Settings() {
   chrome.storage.sync.set({
     tl2AutoCopy: tl2AutocopyCheckbox.checked,
@@ -353,20 +404,28 @@ async function saveFormatResult() {
   }
 }
 
-async function fetchFmtPathSuggestions(prefix) {
+// ── Shared File Bridge path suggestion fetch ──────────────────
+async function fetchFileBridgePathSuggestions(prefix, datalistEl) {
   try {
-    const host = textkitHostInput.value.trim() || 'localhost';
-    const port = parseInt(textkitPortInput.value, 10) || 8765;
-    const resp = await _popupFetch(`http://${host}:${port}/paths?prefix=${encodeURIComponent(prefix)}`);
+    const { host, port } = readFileBridgeSettings();
+    const validation = validateFileBridgeSettings(host, port);
+    if (!validation.valid) return;
+    const fbHost = validation.host;
+    const fbPort = validation.port;
+    const resp = await _popupFetch(`http://${fbHost}:${fbPort}/paths?prefix=${encodeURIComponent(prefix)}`);
     const data = await resp.json().catch(() => ({}));
     const paths = data.paths || [];
     const tildePrefix = prefix.startsWith('~/') ? '~/' : (prefix === '~' ? '~/' : '');
-    fmtPathSuggestions.replaceChildren(...paths.map((path) => {
+    datalistEl.replaceChildren(...paths.map((path) => {
       const option = document.createElement('option');
       option.value = tildePrefix + path;
       return option;
     }));
   } catch {}
+}
+
+async function fetchFmtPathSuggestions(prefix) {
+  return fetchFileBridgePathSuggestions(prefix, fmtPathSuggestions);
 }
 
 let _fmtPathDebounceTimer = null;
@@ -376,8 +435,8 @@ function updateFmtPathSuggestions(current) {
   _fmtPathDebounceTimer = setTimeout(() => fetchFmtPathSuggestions(current), 300);
 }
 
-// ── Lightweight TextKit fetches (popup → backend) ─────────────────
-// These path-autocomplete fetches intentionally call fetch() directly
+// ── Lightweight backend fetches (popup → backend) ─────────────────
+// Path-autocomplete fetches to File Bridge /paths call fetch() directly
 // from the popup instead of routing through the background service
 // worker.
 // Rationale:
@@ -397,7 +456,7 @@ async function _popupFetch(url) {
   }
 }
 
-// ── Path autocomplete (via textkit backend) ────────────────────
+// ── Path autocomplete (via File Bridge backend) ────────────────────
 let _pathDebounceTimer = null;
 
 function loadPathSuggestions() {
@@ -406,24 +465,7 @@ function loadPathSuggestions() {
 }
 
 async function fetchPathSuggestions(prefix) {
-  try {
-    const host = textkitHostInput.value.trim() || 'localhost';
-    const port = parseInt(textkitPortInput.value, 10) || 8765;
-    const resp = await _popupFetch(`http://${host}:${port}/paths?prefix=${encodeURIComponent(prefix)}`);
-    const data = await resp.json().catch(() => ({}));
-    const paths = data.paths || [];
-    // If user typed a ~ prefix, prepend ~/ so the browser's <datalist>
-    // filtering matches. The backend returns paths relative to save_root;
-    // we only need to restore the tilde the user typed.
-    const tildePrefix = prefix.startsWith('~/') ? '~/' : (prefix === '~' ? '~/' : '');
-    tl2PathSuggestions.replaceChildren(...paths.map((path) => {
-      const option = document.createElement('option');
-      option.value = tildePrefix + path;
-      return option;
-    }));
-  } catch {
-    // Backend unreachable — keep existing suggestions
-  }
+  return fetchFileBridgePathSuggestions(prefix, tl2PathSuggestions);
 }
 
 function updatePathSuggestions(current) {
@@ -623,18 +665,12 @@ async function doTranslation() {
   tl2Result.value = '';
   tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
 
-  const host = textkitHostInput.value.trim() || 'localhost';
-  const port = parseInt(textkitPortInput.value, 10) || 8765;
-
   try {
     await chrome.runtime.sendMessage({
       type: 'translate:start',
       tabId: currentTabId,
       text,
       language,
-      sourceUrl: urlInput.value,
-      host,
-      port,
     });
   } catch (e) {
     // sendMessage itself failed (SW terminated, context invalidated, etc.)

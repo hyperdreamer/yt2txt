@@ -92,7 +92,7 @@
       font-size: 11px;
       color: #64748b;
       text-transform: uppercase;
-      min-width: 52px;
+      min-width: 76px;
       line-height: 24px;
     }
     .backend-row label {
@@ -351,7 +351,7 @@
 <body>
   <div class="header">
     <h1>YT2TXT</h1>
-    <span class="version">v1.0.3</span>
+    <span class="version">v0.0.0</span>
     <button id="settings-gear" class="gear-btn" title="Backend Settings">⚙</button>
   </div>
 
@@ -371,6 +371,11 @@
       <span class="row-label">TextKit</span>
       <label>Host <input id="textkit-host" type="text" placeholder="localhost"></label>
       <label>Port <input id="textkit-port" type="number" placeholder="8765"></label>
+    </div>
+    <div class="backend-row">
+      <span class="row-label">File Bridge</span>
+      <label>Host <input id="file-bridge-host" type="text" placeholder="localhost"></label>
+      <label>Port <input id="file-bridge-port" type="number" placeholder="8964"></label>
     </div>
   </div>
 

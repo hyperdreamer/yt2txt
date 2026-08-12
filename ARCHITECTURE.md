@@ -2,7 +2,7 @@
 
 ## Overview
 
-Add two new tabs (Format, Translation) alongside the existing Transcript tab in the YT2TXT Chrome extension. The Format and Translation operations delegate to the **TextKit backend** (port 8765), while the existing Transcript extraction continues using the **YT2TXT backend** (port 8666). All API calls go through the background service worker — the popup never calls `fetch()` directly.
+Add two new tabs (Format, Translation) alongside the existing Transcript tab in the YT2TXT Chrome extension. The Format and Translation operations delegate to the **TextKit backend** (port 8765), the existing Transcript extraction continues using the **YT2TXT backend** (port 8666), and all save/path-autocomplete operations route through **File Bridge** (port 8964). All API calls go through the background service worker — the popup never calls `fetch()` directly except for lightweight path-autocomplete queries.
 
 ### Tab order (yt2txt-specific)
 
@@ -75,7 +75,8 @@ popup.html
 │
 └── .backend-settings (collapsible, at bottom)
     ├── label "YT2TXT" Host/Port (existing, port 8666)
-    └── label "TextKit" Host/Port (NEW, port 8765)
+    ├── label "TextKit" Host/Port (NEW, port 8765)
+    └── label "File Bridge" Host/Port (NEW, port 8964)
 ```
 
 ### Design decision: Prompt placement (delegated to TextKit)
@@ -97,11 +98,10 @@ Rationale:
 User clicks "Translate" in popup
   → popup.js: doTranslation()
     1. Validate: text not empty, currentTabId exists
-    2. Normalize TextKit backend settings (host/port from inputs)
-    3. Update UI: button → "Stop" (danger style), clear result, disable Copy/Save/Download
-    4. Fire-and-forget message to background:
-       { type: 'translate:start', tabId, text, language, sourceUrl, host, port }
-    5. Do NOT await — popup stays responsive for Stop button
+    2. Update UI: button → "Stop" (danger style), clear result, disable Copy/Save/Download
+    3. Fire-and-forget message to background:
+       { type: 'translate:start', tabId, text, language }
+    4. Do NOT await — popup stays responsive for Stop button
 
   → background.js: handleTranslateStart(msg)
     1. Validate: tabId and text present
@@ -111,7 +111,7 @@ User clicks "Translate" in popup
     5. Persist state: tl2Translating:{tabId}=true
     6. Broadcast { type: 'tl2:translating', tabId, value: true }
     7. Handle "original" language → pass-through (no API call, no prompt)
-    8. Build URL: http://{host}:{port}/translate?_={Date.now()}
+    8. Resolve TextKit endpoint via getTextkitEndpoint('/translate')
     9. POST { text, language }  (TextKit resolves the prompt internally)
     10. On success:
         - Store translate:result:{tabId} = payload.text
@@ -122,14 +122,10 @@ User clicks "Translate" in popup
     11. On abort (user Stop):
         - Update state.translate.status = "Translation stopped."
         - Return { ok: true }
-    12. On timeout (AbortError + timedOut):
-        - Update state.translate.error = "Translation timed out."
-        - Broadcast error
-    13. On fetch error:
+    12. On fetch error:
         - Update state.translate.error = error message
         - Broadcast error
-    14. Finally:
-        - Clear timeout
+    13. Finally:
         - Remove controller from translateControllers
         - Remove tl2Translating:{tabId}
         - Broadcast { type: 'tl2:translating', tabId, value: false }
@@ -172,8 +168,8 @@ User clicks "Format" in popup
         - Broadcast state:update
         - If text: fmtAutoCopyIfEnabled(text), fmtAutoSaveIfEnabled(text)
         - Trigger autoTranslate if enabled
-    10. On abort/timeout/error: update state.format.error/status, broadcast state:update
-    11. Finally: clear timeout, remove controller, stopKeepAlive if idle
+    10. On abort/error: update state.format.error/status, broadcast state:update
+    11. Finally: remove controller, stopKeepAlive if idle
 
   → popup.js: receives state:update → renderState() updates format tab from state.format
 ```
@@ -191,9 +187,10 @@ User clicks "Save" on Translation or Format tab
         TextKit does the same. The endpoint /save is the same regardless.)
 
   → background.js: handleSaveTranslation(msg)  // reused name from TextKit
-    1. Build URL: http://{textkitHost}:{textkitPort}/save
+    1. Build URL via getFileBridgeEndpoint('/save') → http://{fileBridgeHost}:{fileBridgePort}/save
     2. POST { text, path }
-    3. Return { ok: true, path } or { ok: false, error }
+    3. Parse response: require HTTP 200-299 AND ok === true
+    4. Return { ok: true, path } or { ok: false, error }
 
   → popup.js: on success
     - Show "Saved!" on button (1500ms)
@@ -204,7 +201,7 @@ User clicks "Save" on Translation or Format tab
 
 Copy uses `navigator.clipboard.writeText()` in the popup (popup has focus, so this works). For auto-copy from background (popup closed), the offscreen document pattern is used (see section 2.5).
 
-Download uses `chrome.downloads.download()` with a blob URL, same as existing transcript download.
+Download creates a Blob from the text, builds an object URL via `URL.createObjectURL()`, clicks a temporary anchor element to trigger the download, then revokes the URL with `URL.revokeObjectURL()`.
 
 ### 2.5 Offscreen clipboard (for auto-copy from background)
 
@@ -284,7 +281,7 @@ Extend the existing `states` Map to include new fields:
 
 ### 3.3 chrome.storage.local keys (global, not per-tab)
 
-*(None — path autocomplete fetches suggestions from TextKit `/paths` endpoint.)*
+*(None — path autocomplete fetches suggestions from File Bridge `/paths` endpoint.)*
 
 ### 3.4 chrome.storage.sync keys (persisted across devices)
 
@@ -294,6 +291,8 @@ Extend the existing `states` Map to include new fields:
 | `yt2txtPort` | number | `8666` | YT2TXT backend port (existing) |
 | `textkitHost` | string | `'localhost'` | **NEW** TextKit backend host |
 | `textkitPort` | number | `8765` | **NEW** TextKit backend port |
+| `fileBridgeHost` | string | `''` | **NEW** File Bridge host (blank = localhost) |
+| `fileBridgePort` | number | `8964` | **NEW** File Bridge port |
 | `tl2AutoCopy` | boolean | `false` | **NEW** Auto-copy translation |
 | `tl2AutoSave` | boolean | `false` | **NEW** Auto-save translation |
 | `tl2AutoSavePath` | string | `''` | **NEW** Save path for translation auto-save |
@@ -335,7 +334,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 | `popup:start` | popup→bg | `{url, lang, force}` | `{ok, error?}` | Start transcript extraction (existing) |
 | `popup:stop` | popup→bg | (none) | `{ok, error?}` | Stop transcript extraction (existing) |
 | `popup:get-state` | popup→bg | (none) | `{ok, state, tabId}` | Get current state (existing) |
-| `translate:start` | popup→bg | `{tabId, text, language, sourceUrl, host, port}` | `{ok, error?}` | **NEW** Start translation |
+| `translate:start` | popup→bg | `{tabId, text, language}` | `{ok, error?}` | **NEW** Start translation (bg resolves TextKit endpoint internally) |
 | `translate:stop` | popup→bg | `{tabId}` | `{ok}` | **NEW** Stop translation |
 | `format:start` | popup→bg | `{tabId, text}` | `{ok, error?}` | **NEW** Start formatting (no `prompt` — TextKit owns it; bg resolves host/port via `getTextkitEndpoint`) |
 | `format:stop` | popup→bg | `{tabId}` | `{ok}` | **NEW** Stop formatting |
@@ -366,7 +365,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 ```
 handleStart() completes successfully
   │
-  └─→ handleFormatStart({ tabId: tab.id, text: resultText, sourceUrl: msg.url })
+  └─→ handleFormatStart({ tabId: tab.id, text: resultText })
         Calls TextKit /format (TextKit resolves the prompt internally)
         On success → stores fmtResult:{tabId}, broadcasts state:update
         On failure → broadcasts state:update with error (no translate)
@@ -430,7 +429,7 @@ No separate `autoFormat` wrapper exists — `handleStart()` calls `handleFormatS
 if (resultText) {
   await chrome.storage.local.set({ [`transcript_raw:${tab.id}`]: resultText });
   try {
-    await handleFormatStart({ tabId: tab.id, text: resultText, sourceUrl: msg.url });
+    await handleFormatStart({ tabId: tab.id, text: resultText });
   } catch (e) {
     console.error('auto-format failed:', e);
   }
@@ -454,6 +453,9 @@ tl2AutoCopy         boolean  false       (NEW)
 tl2AutoSave         boolean  false       (NEW)
 tl2AutoSavePath     string   ""          (NEW)
 yt2txtAutoTranslate boolean  false       (NEW)
+fileBridgeHost      string   ""          (NEW)
+fileBridgePort      number   8964        (NEW)
+tl2Language         string   "original"  (NEW)
 fmtAutoCopy         boolean  false       (NEW)
 fmtAutoSave         boolean  false       (NEW)
 fmtAutoSavePath     string   ""          (NEW)
@@ -462,7 +464,7 @@ fmtAutoSavePath     string   ""          (NEW)
 ### chrome.storage.local (global)
 
 ```
-(none — prompts live in TextKit, path autocomplete fetches from TextKit /paths)
+(none — prompts live in TextKit, path autocomplete fetches from File Bridge /paths)
 ```
 
 ### chrome.storage.local (per-tab, suffixed with `:${tabId}`)
@@ -479,14 +481,15 @@ fmtResult:${tabId}           string   (format result)
 
 ## 7. Backend URL Resolution for Two Backends
 
-YT2TXT uses **two distinct backends**:
+YT2TXT uses **three distinct backends**:
 
 | Backend | Default Port | Purpose | Config Keys |
 |---------|-------------|---------|-------------|
 | YT2TXT | 8666 | Transcript extraction (`/transcript`) | `yt2txtHost`, `yt2txtPort` |
-| TextKit | 8765 | Format (`/format`), Translate (`/translate`), Save (`/save`), Prompt management (`/prompts/*`) | `textkitHost`, `textkitPort` |
+| TextKit | 8765 | Format (`/format`), Translate (`/translate`) | `textkitHost`, `textkitPort` |
+| File Bridge | 8964 | Save (`/save`), Path autocomplete (`/paths`) | `fileBridgeHost`, `fileBridgePort` |
 
-### Background.js: two cached URL builders
+### Background.js: three cached URL builders
 
 ```javascript
 let _yt2txtBaseUrl = null;
@@ -520,13 +523,52 @@ async function getTextkitEndpoint(path) {
 }
 ```
 
-The `buildBackendEndpoint` and `normalizeBackendSettings` functions are reused — they don't care about the port, and the host validation (localhost-only) is the same for both backends.
+### Background.js: File Bridge endpoint cache
+
+```javascript
+const FILE_BRIDGE_DEFAULT_PORT = 8964;
+
+let _fileBridgeBaseUrl = null;
+let _fileBridgeBaseUrlExpiry = 0;
+
+async function getFileBridgeEndpoint(path) {
+  if (!_fileBridgeBaseUrl || Date.now() > _fileBridgeBaseUrlExpiry) {
+    const items = await chrome.storage.sync.get({
+      fileBridgeHost: '',
+      fileBridgePort: FILE_BRIDGE_DEFAULT_PORT,
+    });
+    const hasFileBridgeHost = String(items.fileBridgeHost || '').trim().length > 0;
+    const host = hasFileBridgeHost ? items.fileBridgeHost : DEFAULT_HOST;
+    const port = items.fileBridgePort || FILE_BRIDGE_DEFAULT_PORT;
+    _fileBridgeBaseUrl = buildBackendEndpoint(host, port, '');
+    _fileBridgeBaseUrlExpiry = Date.now() + 60_000;
+  }
+  return _fileBridgeBaseUrl + path;
+}
+```
+
+The File Bridge host defaults to blank (meaning localhost). Changing `fileBridgeHost` or `fileBridgePort` in sync storage invalidates only the File Bridge cache via `chrome.storage.onChanged`.
+
+#### Cache invalidation
+
+```javascript
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'sync') return;
+  if (changes.fileBridgeHost || changes.fileBridgePort) {
+    _fileBridgeBaseUrl = null;
+    _fileBridgeBaseUrlExpiry = 0;
+  }
+  // ... similar for yt2txt and textkit caches
+});
+```
+
+The `buildBackendEndpoint` and `normalizeBackendSettings` functions are reused — they don't care about the port, and the host validation (localhost-only) is the same for all three backends.
 
 ### Popup.js: settings UI
 
 The popup shows both backend settings. The existing Host/Port fields are for yt2txt. TextKit Host/Port fields are added. Both save to `chrome.storage.sync`.
 
-When sending `translate:start` messages, the popup normalizes the TextKit settings and passes `host`/`port` in the message. `format:start` does not include host/port — the background resolves them via `getTextkitEndpoint()`.
+Both `translate:start` and `format:start` do not include host/port — the background resolves the TextKit endpoint via `getTextkitEndpoint()`.
 
 ### TextKit backend discovery
 
@@ -548,9 +590,8 @@ if (!items.textkitHost) items.textkitHost = items.yt2txtHost;
 ### 8.1 Network errors
 
 - All `fetch()` calls in background.js are wrapped in try/catch
-- `AbortError` is handled specially: check `timedOut` flag to distinguish user stop vs timeout
+- `AbortError` indicates user-initiated stop (backend may also abort).
 - User stop: store status message, return `{ ok: true }` (not an error)
-- Timeout: store error status, broadcast error to popup, return `{ ok: false, error }`
 - Other fetch errors: store error message, broadcast to popup
 
 ### 8.2 Empty results
@@ -651,7 +692,7 @@ popup.js init()
      - tl2Translating:{tabId} → restore "Stop" button if was translating
   7. Load format tab state:
      - fmtResult:{tabId} → fill textarea, enable buttons
-  8. Load path suggestions from TextKit backend /paths
+  8. Load path suggestions from File Bridge backend /paths
   9. Update all button states
 ```
 

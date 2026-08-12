@@ -2,7 +2,8 @@
 const DEFAULT_HOST = 'localhost';
 const DEFAULT_PORT = 8666;
 const DEFAULT_TEXTKIT_PORT = 8765;
-const BACKEND_TIMEOUT_MS = 12 * 60 * 1000; // 12 minutes (translation/format may be long)
+const FILE_BRIDGE_DEFAULT_PORT = 8964;
+const BACKEND_TIMEOUT_MS = 12 * 60 * 1000;
 const TRANSCRIPT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 const LOCAL_BACKEND_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
@@ -37,6 +38,42 @@ async function getTextkitEndpoint(path) {
   }
   return _textkitBaseUrl + path;
 }
+
+// ── Backend URL cache (file-bridge) ──────────────────────────────
+let _fileBridgeBaseUrl = null;
+let _fileBridgeBaseUrlExpiry = 0;
+
+async function getFileBridgeEndpoint(path) {
+  if (!_fileBridgeBaseUrl || Date.now() > _fileBridgeBaseUrlExpiry) {
+    const items = await chrome.storage.sync.get({
+      fileBridgeHost: '',
+      fileBridgePort: FILE_BRIDGE_DEFAULT_PORT,
+    });
+    const hasFileBridgeHost = String(items.fileBridgeHost || '').trim().length > 0;
+    const host = hasFileBridgeHost ? items.fileBridgeHost : DEFAULT_HOST;
+    const port = items.fileBridgePort || FILE_BRIDGE_DEFAULT_PORT;
+    _fileBridgeBaseUrl = buildBackendEndpoint(host, port, '');
+    _fileBridgeBaseUrlExpiry = Date.now() + 60_000;
+  }
+  return _fileBridgeBaseUrl + path;
+}
+
+// ── Storage change listener (cache invalidation) ──────────────────
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'sync') return;
+  if (changes.yt2txtHost || changes.yt2txtPort) {
+    _yt2txtBaseUrl = null;
+    _yt2txtBaseUrlExpiry = 0;
+  }
+  if (changes.textkitHost || changes.textkitPort) {
+    _textkitBaseUrl = null;
+    _textkitBaseUrlExpiry = 0;
+  }
+  if (changes.fileBridgeHost || changes.fileBridgePort) {
+    _fileBridgeBaseUrl = null;
+    _fileBridgeBaseUrlExpiry = 0;
+  }
+});
 
 // Backward-compatible alias for the original single-backend helper.
 const getBackendEndpoint = getYt2txtEndpoint;
@@ -380,7 +417,7 @@ async function handleStart(msg) {
     // Cache original transcript before formatting (for retry on format failure)
     await chrome.storage.local.set({ [`transcript_raw:${tab.id}`]: resultText });
     try {
-      await handleFormatStart({ tabId: tab.id, text: resultText, sourceUrl: msg.url });
+      await handleFormatStart({ tabId: tab.id, text: resultText });
     } catch (e) {
       console.error('auto-format failed:', e);
     }
@@ -410,23 +447,17 @@ async function handleStop() {
 
 // ── Handle translate start ─────────────────────────────────────
 async function handleTranslateStart(msg) {
-  const { tabId, text, language, host, port } = msg;
+  const { tabId, text, language } = msg;
   if (!tabId || !text) return { ok: false, error: 'Missing tabId or text' };
 
   // Abort any in-flight translation for this tab
   handleTranslateStop(tabId);
 
   const controller = new AbortController();
-  let timedOut = false;
-  let timeoutId = null;
 
   try {
     translateControllers.set(tabId, controller);
     startKeepAlive();
-    timeoutId = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, BACKEND_TIMEOUT_MS);
 
     // Persist state so popup reopen shows "Stop" button.
     await chrome.storage.local.set({
@@ -495,18 +526,7 @@ async function handleTranslateStart(msg) {
       if (translated) autoSaveIfEnabled(translated);
     } catch (e) {
       if (e.name === 'AbortError') {
-        const message = timedOut ? 'Translation timed out.' : 'Translation stopped.';
-        if (timedOut) {
-          const state = getState(tabId);
-          state.translate.error = message;
-          state.translate.status = message;
-          state.translate.active = false;
-          broadcastState(tabId);
-          chrome.runtime
-            .sendMessage({ type: 'translation:update', tabId, text: '', error: message })
-            .catch(() => {});
-        }
-        return { ok: !timedOut, error: timedOut ? message : undefined };
+        return { ok: true };
       }
       const errorMessage = e.message || 'Translation failed.';
       const state = getState(tabId);
@@ -520,7 +540,6 @@ async function handleTranslateStart(msg) {
       return { ok: false, error: errorMessage };
     }
   } finally {
-    clearTimeout(timeoutId);
     if (translateControllers.get(tabId) === controller) {
       translateControllers.delete(tabId);
       chrome.storage.local.remove(`tl2Translating:${tabId}`);
@@ -540,7 +559,17 @@ function handleTranslateStop(tabId) {
   if (controller) {
     controller.abort();
     translateControllers.delete(tabId);
-    chrome.storage.local.remove(`tl2Translating:${tabId}`);
+  }
+  chrome.storage.local.remove(`tl2Translating:${tabId}`);
+  chrome.runtime
+    .sendMessage({ type: 'tl2:translating', tabId, value: false })
+    .catch(() => {});
+  const state = states.get(tabId);
+  if (state?.translate?.active) {
+    state.translate.active = false;
+    state.translate.status = 'Translation stopped.';
+    state.translate.error = '';
+    broadcastState(tabId);
   }
 }
 
@@ -548,14 +577,28 @@ function handleTranslateStop(tabId) {
 async function handleSaveTranslation(msg) {
   const { text, path } = msg;
   if (!text || !path) return { ok: false, error: 'Missing text or path' };
-  const url = await getTextkitEndpoint('/save');
+  const url = await getFileBridgeEndpoint('/save');
   const response = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, path }),
   });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.error) return { ok: false, error: payload.error || `HTTP ${response.status}` };
+  let payload = null;
+  try {
+    const raw = await response.text();
+    if (raw.trim()) payload = JSON.parse(raw);
+  } catch {
+    // JSON parse failure — payload stays null
+  }
+  if (!response.ok) {
+    return { ok: false, error: (payload && (payload.error || payload.detail)) || `HTTP ${response.status}` };
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { ok: false, error: 'File bridge returned an invalid or empty response.' };
+  }
+  if (payload.ok !== true) {
+    return { ok: false, error: payload.error || payload.detail || 'File bridge save was not acknowledged.' };
+  }
   return { ok: true, path: payload.path || path };
 }
 
@@ -571,11 +614,6 @@ async function handleFormatStart(msg) {
   if (existing) existing.abort();
 
   const controller = new AbortController();
-  let timedOut = false;
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, BACKEND_TIMEOUT_MS);
 
   formatControllers.set(tabId, controller);
   startKeepAlive();
@@ -617,13 +655,11 @@ async function handleFormatStart(msg) {
       try { await fmtAutoCopyIfEnabled(formatted); } catch (e) { console.error('auto-copy fmt failed:', e); }
       try { await fmtAutoSaveIfEnabled(tabId, formatted); } catch (e) { console.error('auto-save fmt failed:', e); }
       // Auto-translate: format completion triggers translation (if enabled).
-      try { await autoTranslate(tabId, formatted, msg.sourceUrl); } catch (e) { console.error('autoTranslate from format failed:', e); }
+      try { await autoTranslate(tabId, formatted); } catch (e) { console.error('autoTranslate from format failed:', e); }
     }
   } catch (e) {
     if (e.name === 'AbortError') {
-      state.format.error = timedOut
-        ? 'Formatting timed out.'
-        : 'Formatting stopped.';
+      state.format.error = 'Formatting stopped.';
     } else {
       state.format.error = e.message || 'Formatting failed.';
     }
@@ -631,7 +667,6 @@ async function handleFormatStart(msg) {
     state.format.active = false;
     broadcastState(tabId);
   } finally {
-    clearTimeout(timeoutId);
     if (formatControllers.get(tabId) === controller) {
       formatControllers.delete(tabId);
     }
@@ -759,7 +794,7 @@ async function fmtAutoSaveIfEnabled(tabId, text) {
 }
 
 // ── Auto-translate helper (called from format completion) ─────
-async function autoTranslate(tabId, text, sourceUrl) {
+async function autoTranslate(tabId, text) {
   const { yt2txtAutoTranslate } = await chrome.storage.sync.get({
     yt2txtAutoTranslate: false,
   });
@@ -771,18 +806,9 @@ async function autoTranslate(tabId, text, sourceUrl) {
   // "Original" → no translation needed (TextKit's prompt chain handles nothing-to-do).
   if (language === 'original') return;
 
-  // Pull TextKit host/port from sync storage for the auto path
-  const backend = await chrome.storage.sync.get({
-    textkitHost: DEFAULT_HOST,
-    textkitPort: DEFAULT_TEXTKIT_PORT,
-  });
-
   handleTranslateStart({
     tabId,
     text,
     language,
-    sourceUrl,
-    host: backend.textkitHost,
-    port: backend.textkitPort,
   }).catch((e) => console.error('autoTranslate failed:', e));
 }
