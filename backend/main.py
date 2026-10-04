@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import shlex
 import shutil
@@ -179,7 +180,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="1.0.4")
+app = FastAPI(title="YT2TXT", version="1.0.5")
 
 
 # ── Config (cached) ────────────────────────────────────────────────
@@ -409,10 +410,58 @@ MAX_AUDIO_BYTES = (
     24 * 1024 * 1024
 )  # OpenAI 25MB limit, leave 1MB for multipart overhead
 MAX_AUDIO_DURATION = 1300  # seconds — under OpenAI's 1400s limit per request
-CHUNK_DURATION_SECONDS = 20 * 60  # ~20 minutes per chunk at 64kbps ≈ 10MB
-CHUNK_OVERLAP_SECONDS = 10  # overlap between chunks to avoid word-boundary cuts
+CHUNK_DURATION_SECONDS = 20 * 60  # ~20 minutes per span at 64kbps ≈ 10MB
+CHUNK_OVERLAP_SECONDS = 10  # shared audio between adjacent spans
+# ``gpt-4o-transcribe`` and ``gpt-4o-mini-transcribe`` silently stop at this
+# many output tokens and still return HTTP 200, so any response reporting the
+# cap is incomplete and its audio must be split further.
+TRANSCRIBE_OUTPUT_TOKEN_CAP = 2048
+MIN_SPAN_SECONDS = 30.0  # never recurse below this much audio
+MAX_SPLIT_DEPTH = 10  # safety bound on recursive span bisection
 
 AUDIO_BITRATE_BPS = 64_000  # matches yt-dlp --postprocessor-args 64k
+
+
+@dataclass(frozen=True)
+class TranscriptionResult:
+    """One transcription response: the text plus the provider's token usage."""
+
+    text: str
+    output_tokens: int | None = None
+
+
+def _hit_output_cap(result: TranscriptionResult) -> bool:
+    """True when the provider reported hitting its output-token ceiling."""
+    return (
+        result.output_tokens is not None
+        and result.output_tokens >= TRANSCRIBE_OUTPUT_TOKEN_CAP
+    )
+
+
+def _parse_transcription_response(response: httpx.Response) -> tuple[str, int | None]:
+    """Extract transcript text and output-token usage from a response body.
+
+    Requests use ``response_format=json`` so the provider reports ``usage``.
+    Some OpenAI-compatible providers ignore that and return raw text, so fall
+    back to the raw body in that case.
+    """
+    body = response.text
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return body.strip(), None
+    if not isinstance(payload, dict):
+        return body.strip(), None
+    text = payload.get("text")
+    if not isinstance(text, str):
+        return body.strip(), None
+    output_tokens: int | None = None
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        raw = usage.get("output_tokens")
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            output_tokens = raw
+    return text.strip(), output_tokens
 
 
 def _estimate_duration(file_size: int) -> float:
@@ -448,8 +497,12 @@ async def _get_audio_duration(audio_path: str) -> float:
 
 async def _transcribe_file(
     audio_path: str, config: AppConfig, model: str, chunk_label: str = ""
-) -> str:
-    """Send a single audio file to OpenAI /v1/audio/transcriptions and return text."""
+) -> TranscriptionResult:
+    """Send one audio file to /v1/audio/transcriptions.
+
+    Returns the transcript together with the provider's output-token usage so
+    callers can detect a silently truncated (cap-hitting) response.
+    """
     if not config.api_key:
         raise HTTPException(
             status_code=500,
@@ -476,9 +529,11 @@ async def _transcribe_file(
 
     boundary = os.urandom(16).hex()
     body = b""
+    # ``json`` (rather than ``text``) is required to receive ``usage`` and thus
+    # detect providers that truncate the transcript at an output-token cap.
     fields: list[tuple[str, str]] = [
         ("model", safe_model),
-        ("response_format", "text"),
+        ("response_format", "json"),
     ]
     for field_name, field_value in fields:
         body += f"--{boundary}\r\n".encode()
@@ -540,10 +595,16 @@ async def _transcribe_file(
                     status_code=502,
                     detail=f"Transcription API failed: {detail}",
                 )
-            text = response.text.strip()
+            text, output_tokens = _parse_transcription_response(response)
             label = f" ({chunk_label})" if chunk_label else ""
-            _debug("transcribe", f"Got {len(text)} chars of transcription{label}")
-            return text
+            usage_note = (
+                f", {output_tokens} output tokens" if output_tokens is not None else ""
+            )
+            _debug(
+                "transcribe",
+                f"Got {len(text)} chars of transcription{label}{usage_note}",
+            )
+            return TranscriptionResult(text=text, output_tokens=output_tokens)
 
         if attempt == 1:
             await asyncio.sleep(1)
@@ -586,141 +647,234 @@ def _deduplicate_overlap(text_a: str, text_b: str, max_overlap: int = 300) -> st
     return text_b
 
 
-async def _transcribe_audio(audio_path: str, config: AppConfig, model: str) -> str:
-    """Transcribe audio, chunking if file exceeds OpenAI's 25MB limit or 1400s duration.
+def _bisect_span(
+    start: float, end: float
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Split a span in half, leaving CHUNK_OVERLAP_SECONDS of shared audio."""
+    mid = (start + end) / 2
+    half_overlap = CHUNK_OVERLAP_SECONDS / 2
+    left = (start, min(end, mid + half_overlap))
+    right = (max(start, mid - half_overlap), end)
+    return left, right
 
-    If the file is ≤24MB and ≤1300s, transcribes directly.
-    Otherwise splits with ffmpeg into chunks, transcribes each, and joins.
+
+def _join_transcripts(texts: list[str]) -> str:
+    """Join segment transcripts, removing duplicated overlap at each seam."""
+    if not texts:
+        return ""
+    joined = texts[0]
+    for i in range(1, len(texts)):
+        joined += "\n" + _deduplicate_overlap(texts[i - 1], texts[i])
+    return joined
+
+
+async def _extract_segment(
+    audio_path: str,
+    start: float,
+    end: float,
+    out_path: str,
+    ffmpeg: str,
+    *,
+    to_eof: bool,
+) -> None:
+    """Write audio[start:end] to *out_path* with ffmpeg stream copy.
+
+    When *to_eof* is true the ``-to`` bound is omitted so ffmpeg copies to the
+    true EOF.  ffprobe duration can be slightly shorter than the real file
+    (rounding, mp3 frame padding), and clamping the final segment to it would
+    silently drop the last fraction of a second of audio.
+    """
+    args: list[str] = [
+        ffmpeg,
+        "-y",
+        "-i",
+        audio_path,
+        "-ss",
+        str(start),
+        "-c",
+        "copy",
+    ]
+    if not to_eof:
+        args += ["-to", str(end)]
+    args.append(out_path)
+
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise HTTPException(
+            status_code=504,
+            detail=f"Timed out creating audio segment {start:.0f}-{end:.0f}s",
+        )
+    if proc.returncode != 0:
+        err = stderr.decode("utf-8", errors="replace")[:300]
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create audio segment: {err}",
+        )
+
+
+class _TranscriptionSession:
+    """Transcribe one audio file, splitting spans that hit the provider cap.
+
+    The file is covered by overlapping top-level spans of at most
+    ``CHUNK_DURATION_SECONDS``.  Each span is one API request.  If the provider
+    reports that the response reached its output-token cap (``gpt-4o-transcribe``
+    truncates at :data:`TRANSCRIBE_OUTPUT_TOKEN_CAP`), the span is bisected with
+    overlap and each half transcribed recursively.  The largest span known to be
+    unsafe is remembered for the rest of the request so later spans start small
+    instead of rediscovering the cap.
+    """
+
+    def __init__(
+        self,
+        audio_path: str,
+        config: AppConfig,
+        model: str,
+        chunks_dir: str,
+        duration: float,
+    ) -> None:
+        self.audio_path = audio_path
+        self.config = config
+        self.model = model
+        self.chunks_dir = chunks_dir
+        self.duration = duration
+        self.ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+        self.target_span = float(CHUNK_DURATION_SECONDS)
+        self.segment_count = 0
+        self.last_segment_path: str | None = None
+        self.last_text = ""
+
+    async def run(self) -> str:
+        """Transcribe the whole file and return the deduplicated transcript."""
+        texts: list[str] = []
+        cursor = 0.0
+        while cursor < self.duration:
+            start = max(0.0, cursor - (CHUNK_OVERLAP_SECONDS if cursor > 0 else 0.0))
+            end = min(self.duration, cursor + self.target_span)
+            texts.append(await self._transcribe_span(start, end, depth=0))
+            cursor = end
+        return _join_transcripts(texts)
+
+    async def _extract(self, start: float, end: float) -> str:
+        self.segment_count += 1
+        out_path = os.path.join(self.chunks_dir, f"chunk_{self.segment_count:03d}.mp3")
+        await _extract_segment(
+            self.audio_path,
+            start,
+            end,
+            out_path,
+            self.ffmpeg,
+            to_eof=end >= self.duration - 1e-6,
+        )
+        return out_path
+
+    async def _transcribe_span(self, start: float, end: float, depth: int) -> str:
+        segment_path = await self._extract(start, end)
+        label = f"span {start:.0f}-{end:.0f}s"
+        result = await _transcribe_file(segment_path, self.config, self.model, label)
+        self.last_segment_path = segment_path
+        self.last_text = result.text
+
+        if not _hit_output_cap(result):
+            return result.text
+
+        span = end - start
+        if span <= MIN_SPAN_SECONDS or depth >= MAX_SPLIT_DEPTH:
+            _debug(
+                "transcribe",
+                f"Span {start:.0f}-{end:.0f}s hit the "
+                f"{TRANSCRIBE_OUTPUT_TOKEN_CAP}-token output cap and cannot be "
+                "split further; returning a truncated transcript",
+            )
+            return result.text
+
+        # Any span this large is unsafe for this provider, so shrink the working
+        # span size and split the remaining top-level spans up front rather than
+        # rediscovering the cap for every chunk.
+        self.target_span = max(MIN_SPAN_SECONDS, min(self.target_span, span / 2))
+        (left_start, left_end), (right_start, right_end) = _bisect_span(start, end)
+        _debug(
+            "transcribe",
+            f"Span {start:.0f}-{end:.0f}s hit the "
+            f"{TRANSCRIBE_OUTPUT_TOKEN_CAP}-token output cap — bisecting into "
+            f"{left_start:.0f}-{left_end:.0f}s and {right_start:.0f}-{right_end:.0f}s",
+        )
+        left = await self._transcribe_span(left_start, left_end, depth + 1)
+        right = await self._transcribe_span(right_start, right_end, depth + 1)
+        return left + "\n" + _deduplicate_overlap(left, right)
+
+
+async def _transcribe_audio(audio_path: str, config: AppConfig, model: str) -> str:
+    """Transcribe audio, splitting whenever the provider imposes a limit.
+
+    Splits when the file exceeds OpenAI's 25MB limit or 1400s duration, and also
+    when a response reaches the provider's output-token cap (which
+    ``gpt-4o-transcribe`` hits silently at 2048 tokens).
     """
     file_size = os.path.getsize(audio_path)
     duration = await _get_audio_duration(audio_path)
+    direct_capped = False
 
     if file_size <= MAX_AUDIO_BYTES and duration <= MAX_AUDIO_DURATION:
         _debug(
             "transcribe",
             f"File {file_size / 1024 / 1024:.1f}MB, {duration:.0f}s — direct",
         )
-        return await _transcribe_file(audio_path, config, model)
+        result = await _transcribe_file(audio_path, config, model)
+        if not _hit_output_cap(result):
+            return result.text
+        direct_capped = True
+        _debug(
+            "transcribe",
+            f"Direct transcription hit the {TRANSCRIBE_OUTPUT_TOKEN_CAP}-token "
+            "output cap — re-transcribing in overlapping spans",
+        )
+    else:
+        reason = "size" if file_size > MAX_AUDIO_BYTES else "duration"
+        _debug(
+            "transcribe",
+            f"File {file_size / 1024 / 1024:.1f}MB, {duration:.0f}s — splitting ({reason})",
+        )
 
-    reason = "size" if file_size > MAX_AUDIO_BYTES else "duration"
-    _debug(
-        "transcribe",
-        f"File {file_size / 1024 / 1024:.1f}MB, {duration:.0f}s — splitting ({reason})",
-    )
-
-    ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
     chunks_dir = os.path.join(os.path.dirname(audio_path), "chunks")
     os.makedirs(chunks_dir, exist_ok=True)
-
-    # Split into overlapping chunks so no word is cut at a boundary.
-    # Each chunk covers CHUNK_DURATION_SECONDS of audio; adjacent chunks
-    # share CHUNK_OVERLAP_SECONDS.  Transcription text is deduplicated
-    # afterward to remove the repeated overlap region.
-    #
-    # max(2, …) ensures we always produce at least two chunks when the
-    # split path is taken.  A single-chunk split is pointless (the audio
-    # is barely over the direct-transcription threshold), and the dedup
-    # logic expects at least two adjacent chunks to work with.
-    num_chunks = max(
-        2,
-        int(duration // CHUNK_DURATION_SECONDS)
-        + (1 if duration % CHUNK_DURATION_SECONDS > 0 else 0),
-    )
-
-    chunk_paths: list[str] = []
-    for i in range(num_chunks):
-        start = max(
-            0.0, i * CHUNK_DURATION_SECONDS - (CHUNK_OVERLAP_SECONDS if i > 0 else 0)
-        )
-        is_last = i == num_chunks - 1
-        # ffprobe duration can be slightly shorter than the actual file
-        # (rounding, mp3 frame padding).  For the last chunk, omit -to so
-        # ffmpeg copies to the true EOF instead of stopping at `duration`.
-        ffmpeg_args: list[str] = [
-            ffmpeg,
-            "-y",
-            "-i",
-            audio_path,
-            "-ss",
-            str(start),
-            "-c",
-            "copy",
-        ]
-        if not is_last:
-            end = min(
-                duration, (i + 1) * CHUNK_DURATION_SECONDS + CHUNK_OVERLAP_SECONDS
-            )
-            ffmpeg_args += ["-to", str(end)]
-        chunk_path = os.path.join(chunks_dir, f"chunk_{i:03d}.mp3")
-        proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_args,
-            chunk_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            _stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise HTTPException(
-                status_code=504,
-                detail=f"Timed out creating chunk {i}",
-            )
-        if proc.returncode != 0:
-            err = _stderr.decode("utf-8", errors="replace")[:300]
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to create chunk {i}: {err}",
-            )
-        chunk_paths.append(chunk_path)
-
+    session = _TranscriptionSession(audio_path, config, model, chunks_dir, duration)
+    if direct_capped:
+        # The whole file already hit the cap, so skip re-sending it as one span
+        # and start from halves.
+        session.target_span = max(MIN_SPAN_SECONDS, duration / 2)
+    joined = await session.run()
     _debug(
         "transcribe",
-        f"Split into {len(chunk_paths)} overlapping chunks "
-        f"({CHUNK_OVERLAP_SECONDS}s overlap)",
+        f"Joined {session.segment_count} segments → {len(joined)} chars (deduped)",
     )
 
-    texts: list[str] = []
-    for i, chunk_path in enumerate(chunk_paths):
-        _debug("transcribe", f"Transcribing chunk {i + 1}/{len(chunk_paths)}")
-        text = await _transcribe_file(
-            chunk_path, config, model, f"chunk {i + 1}/{len(chunk_paths)}"
-        )
-        texts.append(text)
-
-    # Debug: save last chunk's audio and transcription for inspection.
+    # Debug: save the last segment's audio and transcription for inspection.
     # Only when debug mode is enabled — prevents leaking transcript content
     # to /tmp in production and avoids concurrent-request file collisions.
-    if config.debug:
+    if config.debug and session.last_segment_path:
         try:
-            shutil.copy2(chunk_paths[-1], "/tmp/last_chunk_audio.mp3")
+            shutil.copy2(session.last_segment_path, "/tmp/last_chunk_audio.mp3")
             _debug("transcribe", "Saved last chunk audio to /tmp/last_chunk_audio.mp3")
         except Exception as exc:
-            import sys
-
             print(f"Failed to save last chunk audio: {exc}", file=sys.stderr)
 
         try:
             with open("/tmp/last_chunk_transcription.txt", "w") as f:
-                f.write(texts[-1])
+                f.write(session.last_text)
             _debug(
                 "transcribe",
                 "Saved last chunk transcription to /tmp/last_chunk_transcription.txt",
             )
         except Exception as exc:
-            import sys
-
             print(f"Failed to save last chunk transcription: {exc}", file=sys.stderr)
 
-    # Deduplicate overlap text at boundaries between adjacent chunks.
-    joined = texts[0]
-    for i in range(1, len(texts)):
-        deduped = _deduplicate_overlap(texts[i - 1], texts[i])
-        joined += "\n" + deduped
-    _debug(
-        "transcribe",
-        f"Joined {len(chunk_paths)} chunks → {len(joined)} chars (deduped)",
-    )
     return joined
 
 

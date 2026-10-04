@@ -90,8 +90,9 @@ Flow:
 3. Try downloading manual subtitles via yt-dlp, then auto-generated captions.
 4. If subtitles found → parse to plain text, cache, return.
 5. If no subtitles → download audio via yt-dlp (64kbps mono mp3).
-6. If audio exceeds 24MB or 1300s → split into chunks with overlap, transcribe each, deduplicate.
-7. Send to OpenAI `/v1/audio/transcriptions`, cache, return.
+6. If audio exceeds 24MB or 1300s → split into overlapping spans, transcribe each, deduplicate.
+7. If a response hits the provider's output-token cap (`gpt-4o-transcribe` / `gpt-4o-mini-transcribe` silently stop at 2048 output tokens and return HTTP 200) → bisect that span with overlap and retry, recursively.
+8. Send to OpenAI `/v1/audio/transcriptions`, cache, return.
 
 ## Backend config (config.yaml)
 ```yaml

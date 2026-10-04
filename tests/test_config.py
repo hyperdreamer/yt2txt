@@ -20,7 +20,6 @@ from main import (  # noqa: E402
     AppConfig,
     TimeoutConfig,
     _parse_timeout_config,
-    load_config,
 )
 
 
@@ -237,7 +236,7 @@ class TestTimeoutWiring:
 
         class Response:
             is_error = False
-            text = "transcribed"
+            text = '{"text": "transcribed", "usage": {"output_tokens": 42}}'
 
         class Client:
             def __init__(self, *, timeout):
@@ -276,7 +275,8 @@ class TestTimeoutWiring:
             str(audio), config, config.model
         )
 
-        assert result == "transcribed"
+        assert result.text == "transcribed"
+        assert result.output_tokens == 42
         assert captured["httpx_timeout"].connect == 5
         assert captured["httpx_timeout"].read == 300
         assert captured["httpx_timeout"].write == 30
