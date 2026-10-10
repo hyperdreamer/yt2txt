@@ -1,0 +1,78 @@
+schema_version: 1
+generated_at: '2026-10-10T13:41:36Z'
+source_plan:
+  path: docs/superpowers/plans/2026-10-10-transcript-sw-keepalive.md
+  sha256: 1f7fa306cb534325c913962a09430c2329c9e99ac600587ee0bfe2e98a804807
+  commit_oid: ebfc4e0d08584c44f99c2b48f682a141b3ce536f
+  task_numbers:
+  - 1
+lanes:
+- id: keepalive
+  task_ids:
+  - T1
+tasks:
+- id: T1
+  plan_task: 1
+  title: Keepalive accounting across transcript, format, and translate
+  lane: keepalive
+  sequence: 1
+  depends_on: []
+  implementer_tier: standard
+  ownership:
+  - extension/background.js
+  - tests/filebridge.test.js
+  - ARCHITECTURE.md
+  exclusive_resources: []
+  interfaces:
+    consumes:
+    - name: translateControllers
+      source: baseline:11bf4c8
+      signature: 'translateControllers: Map<number, AbortController>'
+      digest: 7fab1f9c98f099229e10825a5c41ccac3acf6e10d716fb6af37adfab7c7aabbe
+    - name: formatControllers
+      source: baseline:11bf4c8
+      signature: 'formatControllers: Map<number, AbortController>'
+      digest: 80f783c59b098b3beb312e6e477b20e9d69da4a78260a1853a8dce13ff48f952
+    - name: startKeepAlive
+      source: baseline:11bf4c8
+      signature: 'startKeepAlive(): void'
+      digest: eee14d60ebc2c0cc22a0101750091c2bec2806857288b83687df2dcdf7429d49
+    - name: stopKeepAlive
+      source: baseline:11bf4c8
+      signature: 'stopKeepAlive(): void'
+      digest: 738fb7ecd698de04e5ccc3aad44ea449f79898e84bb705f57cd1e0b24f918c77
+    produces:
+    - name: transcriptControllers
+      signature: 'transcriptControllers: Map<number, AbortController>'
+      digest: 3f6f3314ec23004286374d2c898825748abc5cd8cd83c5f134ce334cd649d63c
+    - name: syncKeepAlive
+      signature: 'syncKeepAlive(): void'
+      digest: 0eda61f52e00448605237cf262b97c49df024be0bdb20a8e0cb7889d8830e8fa
+  validation:
+  - id: V1
+    argv:
+    - node
+    - --test
+    cwd: .
+    expect_exit: 0
+    description: 'Full JavaScript suite passes (52 tests: 34 filebridge + 18 popup).'
+  - id: V2
+    argv:
+    - node
+    - --check
+    - extension/background.js
+    cwd: .
+    expect_exit: 0
+    description: No syntax errors in the modified service worker.
+validation_summary:
+  all_checks_pass: true
+  checks:
+  - 1. source_plan.sha256 matches committed plan bytes
+  - 2. every plan_task appears exactly once and nothing extra
+  - 3. task ids unique and each owned by exactly one lane
+  - 4. lane sequence contiguous from 1
+  - 5. same-lane task beyond index 0 depends on its predecessor
+  - 6. graph has no cycles
+  - 7. consumed interfaces resolve (baseline digests recorded / cross-task matches)
+  - 8. validation argv has no shell metacharacters and does not mutate Git
+  - 9. ownership globs are repo-relative without escapes; single lane is disjoint by construction

@@ -1,0 +1,5 @@
+digraph execution_graph {
+  rankdir=LR;
+  node [shape=box, style=rounded, fontname="Helvetica"];
+  T1 [label="Task 1: Keepalive accounting across transcript, format, and translate\nlane=keepalive | tier=Standard | plan_task=1"];
+}
