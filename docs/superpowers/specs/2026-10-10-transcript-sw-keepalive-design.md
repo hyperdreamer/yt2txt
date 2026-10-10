@@ -187,6 +187,8 @@ pass.
   harmless, and gap-free when auto-translate is enabled.
 - Duplicate `handleStart` was a pre-existing theoretical race; the added
   `transcriptControllers.has(tab.id)` rejection closes it.
-- Registration is followed immediately by the handler's `try/finally`, so a synchronous throw before
-  the fetch cannot leak the map entry or the interval.
+- For `handleStart`, registration is followed immediately by the handler's `try/finally`, so a
+  synchronous throw before the fetch cannot leak the map entry or the interval. `handleFormatStart`
+  keeps its existing pre-`try` registration; the theoretical throw window there is pre-existing and
+  out of scope.
 - Removing `state.controller` touches abort paths; covered by the existing stop test plus new cases 6 and 7.
