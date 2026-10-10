@@ -58,6 +58,9 @@ the command line, so it could not be driven directly, but the termination rules 
 - No migration of the long fetch to an offscreen document.
 - No changes to timeout constants (`TRANSCRIPT_TIMEOUT_MS`, `BACKEND_TIMEOUT_MS`).
 - No changes to transcript/format/translate semantics, endpoints, or persistence formats.
+- Recorded scope decision: the manual Save path (`handleSaveTranslation`) uses `fetchWithTimeout`'s
+  internal controller and remains unaccounted; a >30 s manual save with the popup closed can still
+  be killed by worker termination. It is intentionally out of scope for this fix.
 
 ## 4. Architecture
 
@@ -90,9 +93,13 @@ idempotent start).
 ### 4.3 Handler changes
 
 - `handleStart(msg)`
+  - reject when `state.active` is set or `transcriptControllers.has(tab.id)` (closes the
+    duplicate-start race where two `handleStart` calls both pass the `state.active` check).
   - after creating the AbortController: `transcriptControllers.set(tab.id, controller); syncKeepAlive();`
+    and begin the `try` immediately so the cleanup below runs on every exit path.
   - in the existing `finally`: delete only when `transcriptControllers.get(tab.id) === controller`,
-    then `syncKeepAlive()`.
+    then `syncKeepAlive()` — the `syncKeepAlive()` call is unconditional, never nested inside the
+    identity guard.
 - `handleFormatStart(msg)`
   - replace `if (translateControllers.size === 0 && formatControllers.size === 0) stopKeepAlive();`
     with `syncKeepAlive()`; the existing identity-guarded delete stays.
@@ -101,14 +108,20 @@ idempotent start).
 - `handleStop()`
   - abort via `const controller = transcriptControllers.get(tab.id); if (controller) controller.abort();`
     instead of `state.controller`.
+- `handleFormatStop()` / `handleTranslateStop()`
+  - after the existing abort + map delete, call `syncKeepAlive()` so the account is local and does
+    not rely on the aborted handler eventually unwinding.
 - `chrome.tabs.onRemoved`
-  - abort via `transcriptControllers.get(tabId)` and delete the map entry alongside the existing cleanup.
+  - abort via `transcriptControllers.get(tabId)`, delete the map entry alongside the existing
+    cleanup, and call `syncKeepAlive()`.
 
 ## 5. Data flow and error handling
 
 - **Success:** the transcript operation ends in `handleStart`'s `finally`; `handleFormatStart`
-  registers immediately afterwards. The keepalive may stop and restart within the same task
-  sequence (well inside the 30 s idle budget), which is harmless.
+  registers after one `chrome.storage.local.set({transcript_raw:…})` round-trip. The keepalive may
+  stop and restart across that handoff (four-plus orders of magnitude inside the 30 s idle budget),
+  which is harmless. With auto-translate enabled the handoff is gap-free: the translate entry is
+  registered synchronously before format's `finally` runs.
 - **Failure/timeout with no format:** `finally` removes the transcript entry; `syncKeepAlive()` sees
   no work and stops the interval. No leak (the naive one-line fix leaks here).
 - **Popup closed mid-run:** the message port closes, but the interval keeps the worker alive until
@@ -117,8 +130,11 @@ idempotent start).
 - **Format/translate abort-and-replace:** the stale handler's `finally` finds
   `map.get(tabId) !== controller` and does not delete the newer entry; `syncKeepAlive()` keeps the
   interval because the map is non-empty.
-- **Tab close mid-transcript:** `onRemoved` aborts the controller and deletes the entry; the
-  handler's `finally` then runs `syncKeepAlive()` with the entry already gone.
+- **Tab close mid-transcript:** `onRemoved` aborts the controller, deletes the entry, and calls
+  `syncKeepAlive()`; the handler's `finally` then runs `syncKeepAlive()` again with the entry
+  already gone (idempotent).
+- **External worker termination:** in-memory maps die with the worker, so no interval can leak; the
+  abandoned backend request completes and caches, which is why a re-run succeeds.
 
 ## 6. Test strategy
 
@@ -137,7 +153,17 @@ Cases:
 4. Transcript pending on tab 1 while a format on tab 2 completes → keepalive still running.
 5. Translate replace on one tab: starting a second translate for the same tab, then letting the
    first handler unwind, leaves the keepalive running for the second.
-6. `handleStop` aborts the transcript and stops the keepalive when nothing else is active.
+6. `handleStop` aborts the transcript and stops the keepalive when nothing else is active; the test
+   must await the aborted `handleStart` (or `waitFor` the accounting boolean), because `handleStop`
+   returns before the aborted handler's `finally` runs.
+7. Format abort-and-replace on one tab, mirroring case 5.
+8. Auto-translate-enabled chain: format completes and translate registers before format's `finally`,
+   so the keepalive never stops across the handoff.
+9. Tab close mid-transcript: `tabs.onRemoved` aborts, deletes, and stops the keepalive when no other
+   work is active. Requires switching the harness's `tabs.onRemoved` from a no-op to `createEvent()`.
+
+Determinism notes: `__isKeepAliveRunning` must be a live getter
+(`var __isKeepAliveRunning = () => keepAliveIntervalId !== null`), not a captured value.
 
 All existing JavaScript (`node --test tests/`) and Python (`pytest tests/`) tests must continue to
 pass.
@@ -146,15 +172,21 @@ pass.
 
 `ARCHITECTURE.md`:
 
-- §2.2/§2.3 flow notes already say format/translate start keepAlive; add transcript.
+- §2.1 Translate (lines ~110, ~132) and §2.2 Format (lines ~160, ~172) note keepAlive start/stop;
+  the transcript flow (§5.1/§5.5) gains an equivalent keepalive note.
 - Per-tab state snippet (line ~247) drops `controller`.
-- `onRemoved` snippet (line ~310) uses `transcriptControllers`.
-- §8.6/§9.2 keepalive description covers all three operations.
+- `onRemoved` snippet (line ~310) uses `transcriptControllers` and `syncKeepAlive()`.
+- §8.6 names all three operation maps; §9.2's state-management table (line ~654) lists
+  `transcriptControllers` alongside the format/translate maps.
 
 ## 8. Risks
 
 - The `getPlatformInfo` keepalive is an unofficial mitigation; Chrome may change termination rules.
   Mitigation: it is already the extension's established pattern and is now applied uniformly.
-- The keepalive may stop and restart during the transcript→format handoff; the gap is sub-millisecond
-  and far inside the 30 s idle budget.
-- Removing `state.controller` touches abort paths; covered by the existing stop test plus new case 6.
+- The keepalive may stop and restart during the transcript→format handoff (one storage round-trip);
+  harmless, and gap-free when auto-translate is enabled.
+- Duplicate `handleStart` was a pre-existing theoretical race; the added
+  `transcriptControllers.has(tab.id)` rejection closes it.
+- Registration is followed immediately by the handler's `try/finally`, so a synchronous throw before
+  the fetch cannot leak the map entry or the interval.
+- Removing `state.controller` touches abort paths; covered by the existing stop test plus new cases 6 and 7.
