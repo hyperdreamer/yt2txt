@@ -4,7 +4,7 @@
 - **Topic:** local-video-file-transcription
 - **PM run:** pm-run-20261011-114932-0005f5e8
 - **Base commit:** `0e3834c8506a259dc2ec4252ecd8a48496161ae3` (main)
-- **Status:** design approved by the user; review #1 raised 4 blockers (all resolved); review #2 returned **CLEAN** (0 blockers); review #2's 12 non-blocking notes were then applied and are pending a narrow re-verification
+- **Status:** design approved by the user; review #1 raised 4 blockers (all resolved); review #2 returned **CLEAN** (0 blockers, 12 notes applied); review #3 verified those dispositions, confirmed the corrected measurement independently, and raised 1 blocker (resolved) plus 6 note residuals (applied) — see Appendices A–C
 
 ## 1. Background
 
@@ -192,15 +192,28 @@ Then, in this order, on the **resolved** path (`Path.expanduser().resolve()`):
    - a usable sidecar subtitle file.
    Else `No audio or subtitle stream found in: <resolved path>`.
 
-   The stream arms come from the **same 30 s bounded probe** as section 6 step 2 (one helper, one
-   bound). A probe timeout or non-zero exit is treated as "no audio stream and no text subtitle
-   stream" — bounded, never a hang, and never a 500.
+   Both stream arms and the embedded-subtitle enumeration come from **one** helper, `probe_streams(path)`,
+   which runs a single bounded call and reports `has_audio` plus the ordered subtitle candidates:
 
-   **Usable sidecar** is defined structurally and by content: a candidate that (a) resolves inside
-   `allowed_roots`, (b) is a regular readable file, and (c) yields non-empty parsed text via
-   `parse_subtitle_text`. Condition (c) is what keeps the gate and the cascade consistent: with no
-   audio, no text subtitle stream, and only an empty sidecar, the request deterministically fails
-   with `No audio or subtitle stream found in: <resolved path>` (400) rather than reaching audio
+   ```
+   ffprobe -v error -show_entries stream=index,codec_type,codec_name:stream_tags=language -of json
+   ```
+
+   Bound: **30 s**. A **successful** probe yields `has_audio` and the ordered subtitle candidates. A
+   timeout, non-zero exit, or unparseable JSON means **streams unknown**: it is not a request failure
+   and never a 500 — the gate passes optimistically, section 6 finds no embedded candidates, and the
+   cascade proceeds (sidecar → audio extraction). Extraction is the authoritative check: if the file
+   really has no audio stream, ffmpeg's non-zero exit reports `Failed to extract audio: …` (400) with
+   a real message. The gate therefore rejects with 400 only when a *successful* probe positively shows
+   no audio stream and no text subtitle stream **and** no usable sidecar exists.
+
+   **Sidecar candidate** is structural: (a) when `allowed_roots` is non-empty, its resolved path is
+   inside them (with empty roots this condition is skipped, per D3); and (b) it is a regular readable
+   file. **Usable sidecar** adds (c) it yields non-empty parsed text via `parse_subtitle_text`.
+   The gate requires a *usable* sidecar; the cache fingerprint (5.5) covers all *candidates*.
+   Condition (c) is what keeps the gate and the cascade consistent: with no audio, no text subtitle
+   stream, and only an empty sidecar, the request deterministically fails with
+   `No audio or subtitle stream found in: <resolved path>` (400) rather than reaching audio
    extraction and failing with a misleading ffmpeg message. When the file *does* have audio, an empty
    sidecar simply falls through in the cascade.
 
@@ -226,10 +239,12 @@ content_hash = sha256(f"{size}\0{mtime_ns}\0{sidecar_fingerprint}")[:16]
 cache_key    = f"local:{path_hash}:{content_hash}"
 ```
 
-- `sidecar_fingerprint` is computed from the deterministic, ordered list of **usable** sidecar
-  candidates (section 6 step 1): `"|".join(f"{resolved}\0{stat.st_size}\0{stat.st_mtime_ns}")`, or
-  `"-"` when there are none. It covers all usable candidates, not just the selected one, so adding,
-  removing, renaming, or editing any sidecar changes the key.
+- `sidecar_fingerprint` is computed from the deterministic, ordered list of **candidate** sidecars
+  (section 6 step 1): `"|".join(f"{resolved}\0{stat.st_size}\0{stat.st_mtime_ns}")`, or
+  `"-"` when there are none. Candidates are structural (allowlist + regular + readable), so this
+  deliberately includes a candidate whose text is empty: it covers all discovered candidates, not
+  just the selected one, so adding, removing, renaming, or editing any sidecar changes the key.
+  Including an empty file only ever makes the key stricter, never staler.
 - Embedded subtitles live inside the container, so `size` + `mtime_ns` already cover them.
 - Editing a sidecar therefore forces a cache miss (design review blocker #3), as does re-exporting
   the video. A path-only key would be a correctness bug.
@@ -268,14 +283,16 @@ wins; otherwise the flow falls through to audio extraction.
 1. **Sidecar files**, in the video's directory, matched by stem:
    `<stem>.srt` / `.vtt` (extension case-insensitive), then `<stem>.<lang>.srt|vtt` with
    English-likes (`en`, `en-*`, `eng`) first and the remainder sorted deterministically.
-   A candidate counts only if it resolves inside the allowlist, is a regular file, and is readable.
-   An unreadable, empty, or whitespace-only sidecar falls through rather than erroring. Parsing uses
-   `parse_subtitle_text`. The usable-candidate list is also what feeds `sidecar_fingerprint` (5.5).
+   A **sidecar candidate** counts only if, when `allowed_roots` is non-empty, it resolves inside them,
+   and it is a regular readable file (the structural conditions of 5.4). An unreadable, empty, or
+   whitespace-only sidecar falls through rather than erroring, and a whitespace-only one is not
+   "usable". Selection takes the **first candidate in the order below that yields non-empty parsed
+   text**; parsing uses `parse_subtitle_text`. The full candidate list (empty files included) is what
+   feeds `sidecar_fingerprint` (5.5).
 2. **Embedded subtitle streams**:
-   - Enumerate with
-     `ffprobe -v error -select_streams s -show_entries stream=index,codec_name:stream_tags=language -of json`,
-     timeout **30 s**. A timeout or non-zero exit means "no embedded candidates" → fall through (not a
-     request failure).
+   - Use the subtitle candidates from `probe_streams()` (section 5.4's single 30 s bounded call; no
+     second probe). When that probe failed or returned unusable output there are no embedded
+     candidates → fall through to audio (not a request failure).
    - Usable codecs only, per `is_text_subtitle_codec`: `subrip`, `srt`, `ass`, `ssa`, `webvtt`,
      `mov_text`, `text`, `ttml`. Bitmap codecs (`hdmv_pgs_subtitle`, `dvd_subtitle`, `dvb_subtitle`,
      `xsub`) **and unrecognised codecs** (`eia_608`, `dvb_teletext`, anything else) are skipped with
@@ -394,16 +411,27 @@ entry.url === tab?.url                                          # legacy/existin
 || sourceKey(entry.url) === sourceKey(tab?.url ?? '')            # local-path equivalence
 ```
 
-where `sourceKey(raw)` is `decodeURI`-then-verbatim for `file:` inputs, the decoded path for raw
-paths, and `raw` itself otherwise — implemented by reusing the same classification order as
-`classifyInput`. Consequences:
+where `sourceKey(raw)` is:
+
+| `raw` | `sourceKey(raw)` |
+| --- | --- |
+| `file:` scheme (case-insensitive) | `decodeURIComponent(new URL(raw).pathname)`, falling back to `raw` if `new URL` throws |
+| starts with `/` | `raw` verbatim (never `decodeURI`-ed, so a literal `%` cannot throw) |
+| starts with `~` | `raw` verbatim (the popup cannot expand `~`, so a `~` path is compared literally and is not restored from the equivalent `file:///home/…` form — a documented, low-impact gap) |
+| anything else | `raw` verbatim |
+
+`decodeURIComponent` is required rather than `decodeURI`: it decodes `%3F`/`%23` to `?`/`#` the same
+way the backend's `unquote` does, so `file:///a/My%3FVideo.mp4` and `/a/My?Video.mp4` are the same key,
+and it cannot be applied to raw paths at all (a literal `%` throws). Consequences:
 
 - `file:///a/My%20Video.mp4` and `/a/My Video.mp4` are the same key, so the primary D1 flow
   (file tab, SW restart, reopen) restores as before.
-- A raw path pasted while sitting on an unrelated tab restores whenever that tab is still the active
-  one; if the user has since navigated that tab to a different URL, the textarea stays empty by
-  design. The transcript is still in the backend cache, so one click restores it instantly — the
-  existing, already-accepted behaviour for a mismatched tab. Documented, not silent.
+- A raw path pasted while sitting on a tab whose URL is a web address is **not** auto-restored on
+  reopen: it is stored under the tab id, but the second disjunct compares local-vs-web keys and the
+  first compares the raw path with the page URL, so neither matches, and the `{text, url}` schema does
+  not record the tab URL that was current at request time. Nothing is lost — the transcript is already
+  in the backend cache, so pressing Get Transcript again returns it in one instant round trip. This is
+  the existing, already-accepted behaviour for a mismatched tab, now stated explicitly.
 
 Storage schema is unchanged (still `{text, url}`).
 
@@ -419,7 +447,7 @@ Storage schema is unchanged (still `{text, url}`).
 | Path missing | 404 | `Local file not found: <path>` |
 | Path is not a regular file | 400 | `<path> is not a regular file` |
 | Path unreadable | 403 | `<path> is not readable` |
-| No audio, no text subs, no usable sidecar | 400 | `No audio or subtitle stream found in: <path>` |
+| No audio, no text subs, no usable sidecar (successful probe) | 400 | `No audio or subtitle stream found in: <path>` |
 | ffmpeg/ffprobe missing | 500 | `ffmpeg is not installed.` |
 | Audio extraction non-zero exit | 400 | `Failed to extract audio: <stderr tail>` |
 | Audio extraction timeout | 504 | `Timed out extracting audio from <path>` |
@@ -451,6 +479,8 @@ local_files:
 - Roots are resolved (`Path.expanduser().resolve()`) **once at config load** and stored in
   `AppConfig.local_files.allowed_roots` as `tuple[Path, ...]`; `prepare()` receives exactly that and
   performs no further resolution (the per-request path is resolved, the roots are not re-resolved).
+  Order matters: the absolute-path check runs **after** `expanduser` but **before** `resolve()`, since
+  `resolve()` would make a relative entry absolute and silently defeat the check.
 - Root existence is not required (an offline mount must not prevent the backend from starting).
 - `config.example.yaml` documents the new block; it is additive, so an existing `config.yaml`
   without the section keeps working with `allowed_roots = ()` (unrestricted).
@@ -467,10 +497,10 @@ absent. No test requires network access or the user's files.
 | --- | --- |
 | Classification | `file:///a/b%20c.mp4` decodes; `FILE:///a/b.mp4` and `file:/a/b.mp4` accepted; `file://localhost/…` accepted; `file://otherhost/…`, `file://x.mp4` and `file://home/henry/x.mp4` → 400 remote-host (**pins netloc-before-path**); `file://` → 400 absolute-path; `file:///a.mp4?q=1` and `…/a.mp4#f` → 400; `file:///a/My%3FVideo.mp4` → `/a/My?Video.mp4` accepted; raw `/a/my?file.mp4` → accepted verbatim (no URL parsing of raw paths); `~/x` expands; `/abs/x` accepted; `https://…` → `None`; `//www.youtube.com/watch?v=…` → `None` (**web-regression guard**); `Downloads/x.mp4` → `None`; `rtmp://…` → `None`; `C:\Users\x.mp4` → `None` |
 | Access policy | empty roots = unrestricted; inside root allowed; outside root → 403; **symlink inside root pointing outside → 403**; `..` traversal outside root → 403; roots quoted in the message; **symlinked sidecar escaping the roots is skipped, request still succeeds** |
-| Validation | missing → 404; directory → 400; unreadable → 403 (`chmod 000`, skipped when running as root); **no audio + usable sidecar → subtitles result, not 400**; no audio + no subs + no sidecar → 400; **no audio + only an empty sidecar → 400** (gate/cascade agree, pins the deterministic message); **gate probe timeout or non-zero exit → treated as no audio/no text subs** (monkeypatched) → 400 when no usable sidecar; ffmpeg/ffprobe absent → 500 (monkeypatched `shutil.which`) |
+| Validation | missing → 404; directory → 400; unreadable → 403 (`chmod 000`, skipped when running as root); **no audio + usable sidecar → subtitles result, not 400** (also run with empty `allowed_roots`); **a successful probe showing no audio, no text subs and no usable sidecar → 400**; **no audio + only an empty sidecar → 400** (gate/cascade agree, pins the deterministic message); **probe timeout, non-zero exit, or unparseable JSON → gate passes optimistically and extraction is attempted** (monkeypatched), with the ffmpeg failure surfacing as 400; ffmpeg/ffprobe absent → 500 (monkeypatched `shutil.which`) |
 | Cache key | stable for an unchanged file; changes after video rewrite; changes after `os.utime`; **changes after rewriting only the sidecar**; changes when a sidecar is added or removed; distinct paths → distinct keys; stale same-path rows deleted on write; `force` skips the read and rewrites |
 | Sidecar cascade | `.srt` preferred over `.vtt`; `en` variant preferred over another language; uppercase extension matched; empty sidecar falls through; unreadable sidecar falls through |
-| Embedded cascade | MKV with a `subrip` track → text; **subtitle whose global stream index ≠ its subtitle ordinal → extracted** (pins `-map 0:<index>`); multiple text tracks → deterministic pick; empty stream output → next candidate; non-zero ffmpeg exit → fall through to audio; **ffprobe enumeration timeout or non-zero exit → falls through to audio** (monkeypatched); **`is_text_subtitle_codec` predicate unit test** incl. `hdmv_pgs_subtitle`, `dvd_subtitle`, `eia_608`, `dvb_teletext` → False and `subrip`/`mov_text`/`ass`/`webvtt` → True (avoids needing an unencodable bitmap fixture) |
+| Embedded cascade | MKV with a `subrip` track → text; **subtitle whose global stream index ≠ its subtitle ordinal → extracted** (pins `-map 0:<index>`); multiple text tracks → deterministic pick; empty stream output → next candidate; non-zero ffmpeg exit → fall through to audio; **probe timeout, non-zero exit, or unparseable JSON → no embedded candidates → falls through to audio** (monkeypatched); **`is_text_subtitle_codec` predicate unit test** incl. `hdmv_pgs_subtitle`, `dvd_subtitle`, `eia_608`, `dvb_teletext` → False and `subrip`/`mov_text`/`ass`/`webvtt` → True (avoids needing an unencodable bitmap fixture) |
 | Audio extraction | produced mp3 is mono, 64 kbps, audio-only (asserted via `ffprobe`); extraction timeout → 504 (monkeypatched bound); non-zero exit → 400 |
 | Response fields | sidecar → `model: "sidecar"`; embedded → `model: "ffmpeg"`; both → `source: "subtitles"`; transcription → real model, `source: "transcription"` |
 | Web regression | `/transcript` with `https://…` still calls the yt-dlp path and never enters the local branch |
@@ -554,7 +584,7 @@ re-review verifies each against the section named here.
 
 | # | Blocker | Resolution | Section |
 | --- | --- | --- | --- |
-| 1 | `-map 0:s:<idx>` used ffprobe's global `stream.index` where ffmpeg expects a subtitle ordinal, so embedded extraction failed (`Stream map matches no streams`) | Extract with `-map 0:<global index>`; add a fixture whose subtitle global index ≠ its subtitle ordinal | 5.1, 6 step 2, 12.1 |
+| 1 | `-map 0:s:<idx>` used ffprobe's global `stream.index` where ffmpeg expects a subtitle ordinal, so embedded extraction failed (`Stream map matches no streams`) | Extract with `-map 0:<global index>`; add a fixture whose subtitle global index ≠ its subtitle ordinal | 6 step 2, 12.1 |
 | 2 | `prepare()`'s stream gate rejected files with no audio and no embedded text subs *before* the sidecar check, making the sidecar path unreachable | Usability gate now also accepts a usable sidecar; sidecar discovery feeds the gate | 5.4 step 5, 12.1 |
 | 3 | Cache key covered only the video, so editing a sidecar served a stale transcript for the TTL | Key is `local:<path_hash>:<content_hash>` with `content_hash` covering size, mtime, **and** the ordered usable-sidecar fingerprint; stale same-path rows deleted on write | 5.5, 12.1 |
 | 4 | `starts with "/"` classified `//host/path` as LOCAL although yt-dlp accepts those URLs today, falsifying the additive claim | `//` is classified WEB before the scheme/path checks; regression test added | 5.2, 12.1 |
@@ -580,3 +610,19 @@ removed from section 10, section 13, and the risk table.
 | 10 | ffprobe timeout fall-through untested | Monkeypatched timeout/non-zero tests for both probes | 12.1 |
 | 11 | Popup `FILE://` / `file:/x` cases untested | Added, with the popup classification order pinned (`//` first) | 9.2, 12.3 |
 | 12 | `allowed_roots` scalar/relative entries unspecified | Scalar and relative entries raise `RuntimeError`; tests added | 11, 12.2 |
+
+## Appendix C — Design review #3 dispositions
+
+Review #3 verified all 12 of review #2's dispositions, independently reproduced the Chromium
+measurement (`correct`), and returned 1 blocker plus 6 note residuals. All are applied.
+
+| # | Finding | Disposition | Section |
+| --- | --- | --- | --- |
+| B1 | §9.4's consequence bullet claimed a pasted raw path auto-restores on an unrelated tab, contradicting the restore rule the same section defines (local key vs web key never match; the `{text, url}` schema does not record the request-time tab URL) | Bullet rewritten to match the rule: such a result is not auto-restored, and the backend cache makes re-running instant | 9.4 |
+| 1 | §6.1's "candidate" conditions omitted the non-empty-text condition, leaving the fingerprint ambiguous | Two terms defined explicitly: structural **candidate** (allowlist + regular + readable, used by the fingerprint) and **usable** (candidate with non-empty parsed text, required by the gate) | 5.4 step 5, 5.5, 6.1 |
+| 2 | `sourceKey` using `decodeURI` could not produce the claimed equality and throws on a literal `%` | `file:` inputs use `decodeURIComponent(new URL(raw).pathname)` with a fallback; raw paths and `~` paths are verbatim; the `~` gap is documented | 9.4 |
+| 3 | "Same probe" was loose: §5.4 needed audio while §6.2 specified a subtitle-only ffprobe | One helper `probe_streams()` with one documented command; §6.2 consumes its subtitle entries | 5.4 step 5, 6 step 2 |
+| 4 | The usable-sidecar allowlist condition contradicted D3's empty = unrestricted default | Condition stated as "when `allowed_roots` is non-empty"; the sidecar test is also run with empty roots | 5.4 step 5, 12.1 |
+| 5 | The relative-entry `RuntimeError` had no specified point relative to `resolve()` | Order pinned: after `expanduser`, before `resolve()`, because `resolve()` would defeat it | 11 |
+| 6 | Appendix A row 1 cited §5.1, which contains no such text | Citation corrected to "6 step 2, 12.1" | Appendix A |
+| — | (Consequential, found while applying note 3) Unifying the probe made the gate's "probe failure ⇒ 400" and the enumeration's "probe failure ⇒ fall through to audio" mutually exclusive | Single rule: a **failed** probe means *streams unknown* — the gate passes optimistically and extraction is attempted, so only a **successful** probe showing nothing usable yields the 400. Test rows realigned | 5.4 step 5, 6 step 2, 10, 12.1 |
