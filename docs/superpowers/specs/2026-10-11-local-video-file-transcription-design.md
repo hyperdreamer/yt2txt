@@ -91,7 +91,8 @@ its bound, not its cost). Local inputs bypass it entirely.
 New module `backend/local_file.py` owns everything local-file-specific:
 
 ```python
-prepare(raw: str, allowed_roots: tuple[Path, ...], debug: Logger) -> LocalTarget | None  # classify + validate + key
+prepare(raw: str, allowed_roots: tuple[Path, ...], debug: Logger) -> LocalTarget | None  # classify + validate + gate + key
+probe_streams(path: str, debug: Logger) -> StreamProbe                                    # one bounded ffprobe
 await try_subtitles(target: LocalTarget, debug: Logger) -> tuple[str, str] | None         # (text, model); sidecar, then embedded
 await extract_audio(target: LocalTarget, tmpdir: str, debug: Logger) -> str               # -> mp3 path
 parse_subtitle_text(content: str) -> str                                  # SRT/VTT -> plain text
@@ -111,7 +112,15 @@ is_text_subtitle_codec(codec: str) -> bool                                # usab
   `local_file.parse_subtitle_text(content)`, so the URL flow and any external caller are unaffected.
   The string form is needed because embedded subtitles are extracted to stdout, not to a file.
 - `LocalTarget` is a frozen dataclass: `raw`, `path` (resolved `Path`), `sidecar_fingerprint` (str),
-  `cache_key` (str), `size` (int), `mtime_ns` (int).
+  `cache_key` (str), `size` (int), `mtime_ns` (int), and `streams: StreamProbe`.
+- **The probe result travels on the target — that is what makes "one probe" achievable.**
+  `prepare()` runs `probe_streams()` once, applies the usability gate with that result, and stores it
+  on the returned `LocalTarget`; `try_subtitles()` reads `target.streams.subtitle_candidates` and never
+  probes again. `StreamProbe` is a frozen dataclass
+  `{ok: bool, has_audio: bool | None, subtitle_candidates: tuple[StreamCandidate, ...]}`, where
+  `ok is False` means streams are unknown (timeout, non-zero exit, or unparseable JSON) and
+  `has_audio`/`subtitle_candidates` are then `None`/empty. Declaring the carrier here is deliberate:
+  without it, an implementer must either probe twice or silently extend the seam.
 
 `main.py::transcript` becomes, in order:
 
@@ -415,7 +424,7 @@ where `sourceKey(raw)` is:
 
 | `raw` | `sourceKey(raw)` |
 | --- | --- |
-| `file:` scheme (case-insensitive) | `decodeURIComponent(new URL(raw).pathname)`, falling back to `raw` if `new URL` throws |
+| `file:` scheme (case-insensitive) | `decodeURIComponent(new URL(raw).pathname)`, falling back to `raw` if **either** `new URL` or `decodeURIComponent` throws (the WHATWG parser accepts malformed sequences such as `file:///a/50%off.mp4`, which `decodeURIComponent` then rejects) |
 | starts with `/` | `raw` verbatim (never `decodeURI`-ed, so a literal `%` cannot throw) |
 | starts with `~` | `raw` verbatim (the popup cannot expand `~`, so a `~` path is compared literally and is not restored from the equivalent `file:///home/…` form — a documented, low-impact gap) |
 | anything else | `raw` verbatim |
@@ -586,7 +595,7 @@ re-review verifies each against the section named here.
 | --- | --- | --- | --- |
 | 1 | `-map 0:s:<idx>` used ffprobe's global `stream.index` where ffmpeg expects a subtitle ordinal, so embedded extraction failed (`Stream map matches no streams`) | Extract with `-map 0:<global index>`; add a fixture whose subtitle global index ≠ its subtitle ordinal | 6 step 2, 12.1 |
 | 2 | `prepare()`'s stream gate rejected files with no audio and no embedded text subs *before* the sidecar check, making the sidecar path unreachable | Usability gate now also accepts a usable sidecar; sidecar discovery feeds the gate | 5.4 step 5, 12.1 |
-| 3 | Cache key covered only the video, so editing a sidecar served a stale transcript for the TTL | Key is `local:<path_hash>:<content_hash>` with `content_hash` covering size, mtime, **and** the ordered usable-sidecar fingerprint; stale same-path rows deleted on write | 5.5, 12.1 |
+| 3 | Cache key covered only the video, so editing a sidecar served a stale transcript for the TTL | Key is `local:<path_hash>:<content_hash>` with `content_hash` covering size, mtime, **and** the ordered candidate-sidecar fingerprint (candidate = structural, per the terminology finalised in Appendix C); stale same-path rows deleted on write | 5.5, 12.1 |
 | 4 | `starts with "/"` classified `//host/path` as LOCAL although yt-dlp accepts those URLs today, falsifying the additive claim | `//` is classified WEB before the scheme/path checks; regression test added | 5.2, 12.1 |
 
 ## Appendix B — Design review #2 dispositions
@@ -600,14 +609,14 @@ removed from section 10, section 13, and the risk table.
 | --- | --- | --- | --- |
 | 1 | `_cache_put_local` wrapper could not be "same transaction" as the insert | Helper now opens one connection and does insert + TTL prune + stale delete before one commit | 5.5 |
 | 2 | "`tab.url` is empty when file access is disabled" was false when measured | Claim replaced by the measurement; toggle instruction removed from the message, README, and risks | 10, 13, 14 |
-| 3 | Gate probe had no timeout | Gate and enumeration share one 30 s bounded probe; timeout/non-zero ⇒ no streams | 5.4 step 5, 6 step 2 |
+| 3 | Gate probe had no timeout | Gate and embedded enumeration share one bounded `probe_streams()` call | 5.4 step 5, 6 step 2 |
 | 4 | `prepare()` lacked a `debug` parameter it needed | `Logger` callable injected into `prepare`, `try_subtitles`, `extract_audio`; `main` passes `_debug` | 5.1, 5.4 |
 | 5 | URL parsing could truncate a legal raw path containing `?`/`#` | URL parsing and query/fragment rejection apply to `file:`-scheme inputs only; raw paths are verbatim | 5.3 |
 | 6 | Missing tests for netloc precedence and percent-encoded `?`/`#` | Added to the matrix | 12.1 |
 | 7 | "Usable sidecar" vs "empty sidecar falls through" were inconsistent | Usable requires non-empty parsed text; the no-audio + empty-sidecar case is pinned to the 400 message | 5.4 step 5, 12.1 |
 | 8 | Derived abort message had no test | Pure `formatTimeoutMessage(ms)` helper + source-level test | 9.3, 12.5 |
 | 9 | Restore rule was ambiguous | Written as an explicit `entry.url === tab.url \|\| sourceKey(...) === sourceKey(...)` condition and tested through `init()` | 9.4, 12.3 |
-| 10 | ffprobe timeout fall-through untested | Monkeypatched timeout/non-zero tests for both probes | 12.1 |
+| 10 | ffprobe timeout fall-through untested | Monkeypatched failed-probe tests: gate becomes optimistic, embedded candidates vanish, extraction is attempted | 12.1 |
 | 11 | Popup `FILE://` / `file:/x` cases untested | Added, with the popup classification order pinned (`//` first) | 9.2, 12.3 |
 | 12 | `allowed_roots` scalar/relative entries unspecified | Scalar and relative entries raise `RuntimeError`; tests added | 11, 12.2 |
 
@@ -626,3 +635,16 @@ measurement (`correct`), and returned 1 blocker plus 6 note residuals. All are a
 | 5 | The relative-entry `RuntimeError` had no specified point relative to `resolve()` | Order pinned: after `expanduser`, before `resolve()`, because `resolve()` would defeat it | 11 |
 | 6 | Appendix A row 1 cited §5.1, which contains no such text | Citation corrected to "6 step 2, 12.1" | Appendix A |
 | — | (Consequential, found while applying note 3) Unifying the probe made the gate's "probe failure ⇒ 400" and the enumeration's "probe failure ⇒ fall through to audio" mutually exclusive | Single rule: a **failed** probe means *streams unknown* — the gate passes optimistically and extraction is attempted, so only a **successful** probe showing nothing usable yields the 400. Test rows realigned | 5.4 step 5, 6 step 2, 10, 12.1 |
+
+## Appendix D — Design review #4 dispositions
+
+Review #4 returned `CLEAN` (0 blockers) and confirmed every Appendix C item resolved, including the
+failed-probe rule and the `decodeURIComponent` equivalence (independently checked in Node). Four
+non-blocking notes were applied.
+
+| # | Note | Disposition | Section |
+| --- | --- | --- | --- |
+| 1 | The one-probe rule had no carrier in the declared interfaces (an implementer would probe twice or extend the seam silently) | `LocalTarget` now carries `streams: StreamProbe`; `prepare()` probes once and consumes it for the gate; `try_subtitles()` reads it and never re-probes | 5.1 |
+| 2 | Appendix A row 3 still said "usable-sidecar fingerprint" | Reworded to candidate-sidecar with a pointer to the finalised terminology | Appendix A |
+| 3 | Appendix B rows 3 and 10 still described the pre-review-#3 "no streams" semantics and "both probes" | Reworded to one `probe_streams()` call and the streams-unknown rule | Appendix B |
+| 4 | `sourceKey`'s fallback was scoped to `new URL` throwing only | Fallback now covers `decodeURIComponent` throwing too (`file:///a/50%off.mp4`) | 9.4 |
