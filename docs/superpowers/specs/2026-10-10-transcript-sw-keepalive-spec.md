@@ -1245,6 +1245,7 @@ translate flow at D1; the combined block is unique):
 New:
 
 ```
+    3. Create new AbortController → formatControllers.set(tabId, controller)
     4. Start keepAlive (idempotent; the interval runs while any of transcriptControllers, formatControllers, translateControllers is non-empty)
 ```
 
