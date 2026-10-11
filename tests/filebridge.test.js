@@ -43,6 +43,7 @@ function createBackgroundHarness(options = {}) {
   const runtimeMessages = [];
 
   const onStorageChanged = createEvent();
+  const onTabRemoved = createEvent();
 
   const chrome = {
     storage: {
@@ -72,7 +73,7 @@ function createBackgroundHarness(options = {}) {
       }
     },
     tabs: {
-      onRemoved: { addListener() {} },
+      onRemoved: onTabRemoved,
       query: async () => [{ id: 1, windowId: 10, active: true }]
     },
     runtime: {
@@ -106,10 +107,17 @@ function createBackgroundHarness(options = {}) {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(BACKGROUND_PATH, 'utf8'), context, { filename: BACKGROUND_PATH });
 
-  // Expose internal Maps via var aliases for tests.
-  vm.runInContext("var __states = states; var __translateControllers = translateControllers; var __formatControllers = formatControllers;", context);
+  // Expose internal Maps and keepalive state via var aliases for tests.
+  vm.runInContext(
+    "var __states = states;" +
+      "var __translateControllers = translateControllers;" +
+      "var __formatControllers = formatControllers;" +
+      "var __transcriptControllers = transcriptControllers;" +
+      "var __isKeepAliveRunning = () => keepAliveIntervalId !== null;",
+    context
+  );
 
-  return { context, fetchCalls, onStorageChanged, syncValues, localData, runtimeMessages };
+  return { context, fetchCalls, onStorageChanged, onTabRemoved, syncValues, localData, runtimeMessages };
 }
 
 // ── File Bridge save routing ──────────────────────────────────────
@@ -635,4 +643,267 @@ test('format has no fixed timeout — Stop still aborts via AbortController', as
   assert.equal(result.ok, true);
   const state = harness.context.__states.get(1);
   assert.equal(state.format.status, 'Formatting stopped.');
+});
+
+function jsonResponse(body, { ok = true, status = 200 } = {}) {
+  return {
+    ok,
+    status,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  };
+}
+
+function deferredFetchQueue() {
+  const queues = new Map(); // path -> [{ promise, resolve, reject }]
+
+  function enqueue(path) {
+    let resolve;
+    let reject;
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    const entry = { promise, resolve, reject };
+    if (!queues.has(path)) queues.set(path, []);
+    queues.get(path).push(entry);
+    return entry;
+  }
+
+  const entries = (path) => queues.get(path) || [];
+
+  const fetch = (url, options = {}) => {
+    const text = String(url);
+    const path = ['/transcript', '/format', '/translate', '/save'].find((candidate) => text.includes(candidate));
+    if (!path) return Promise.reject(new Error(`unrouted fetch: ${text}`));
+    const entry = enqueue(path);
+    const abort = () => entry.reject(new DOMException('Aborted', 'AbortError'));
+    if (options.signal?.aborted) abort();
+    else options.signal?.addEventListener('abort', abort, { once: true });
+    return entry.promise;
+  };
+
+  return {
+    fetch,
+    count: (path) => entries(path).length,
+    resolve: (path, value, index = 0) => entries(path)[index].resolve(value),
+  };
+}
+
+test('keepalive case 1: transcript in flight keeps the interval running', async () => {
+  const router = deferredFetchQueue();
+  const harness = createBackgroundHarness({ fetch: router.fetch });
+
+  const operation = harness.context.handleStart({ url: 'https://example.com/v' });
+  await waitFor(() => harness.context.__transcriptControllers.has(1), 'transcript controller was not registered');
+
+  assert.equal(harness.context.__isKeepAliveRunning(), true);
+  assert.equal(router.count('/transcript'), 1);
+
+  await harness.context.handleStop();
+  const result = await operation;
+  assert.equal(result.ok, true);
+  assert.equal(harness.context.__transcriptControllers.has(1), false);
+  assert.equal(harness.context.__isKeepAliveRunning(), false);
+});
+
+test('keepalive case 2: keepalive survives transcript→format handoff, stops after format when auto-translate is off', async () => {
+  const router = deferredFetchQueue();
+  const harness = createBackgroundHarness({
+    syncValues: { yt2txtAutoTranslate: false },
+    fetch: router.fetch,
+  });
+
+  const operation = harness.context.handleStart({ url: 'https://example.com/v' });
+  await waitFor(() => router.count('/transcript') === 1, 'transcript fetch did not start');
+  assert.equal(harness.context.__isKeepAliveRunning(), true);
+
+  router.resolve('/transcript', jsonResponse({ text: 'TRANSCRIPT', source: 'subtitles' }));
+  await waitFor(() => router.count('/format') === 1, 'auto-format fetch did not start');
+
+  assert.equal(harness.context.__transcriptControllers.has(1), false);
+  assert.equal(harness.context.__formatControllers.has(1), true);
+  assert.equal(harness.context.__isKeepAliveRunning(), true);
+
+  router.resolve('/format', jsonResponse({ text: 'FORMATTED' }));
+  await operation;
+
+  assert.equal(harness.context.__formatControllers.has(1), false);
+  assert.equal(harness.context.__isKeepAliveRunning(), false);
+});
+
+test('keepalive case 3: transcript failure with no format stops the interval (leak regression)', async () => {
+  const router = deferredFetchQueue();
+  const harness = createBackgroundHarness({ fetch: router.fetch });
+
+  const operation = harness.context.handleStart({ url: 'https://example.com/v' });
+  await waitFor(() => router.count('/transcript') === 1, 'transcript fetch did not start');
+  assert.equal(harness.context.__isKeepAliveRunning(), true);
+
+  router.resolve('/transcript', jsonResponse({ error: 'backend exploded' }, { ok: false, status: 500 }));
+  const result = await operation;
+
+  assert.equal(result.ok, true);
+  assert.equal(harness.context.__transcriptControllers.has(1), false);
+  assert.equal(harness.context.__isKeepAliveRunning(), false);
+  assert.match(harness.context.__states.get(1).error, /backend exploded/);
+});
+
+test('keepalive case 4: transcript on tab 1 keeps running while a format on tab 2 completes', async () => {
+  const router = deferredFetchQueue();
+  const harness = createBackgroundHarness({
+    syncValues: { yt2txtAutoTranslate: false },
+    fetch: router.fetch,
+  });
+
+  const transcriptOp = harness.context.handleStart({ url: 'https://example.com/v' });
+  await waitFor(() => router.count('/transcript') === 1, 'transcript fetch did not start');
+  assert.equal(harness.context.__isKeepAliveRunning(), true);
+
+  const formatOp = harness.context.handleFormatStart({ tabId: 2, text: 'other tab' });
+  await waitFor(() => router.count('/format') === 1, 'format fetch did not start');
+  assert.equal(harness.context.__formatControllers.has(2), true);
+  assert.equal(harness.context.__transcriptControllers.has(1), true);
+
+  router.resolve('/format', jsonResponse({ text: 'FORMATTED' }));
+  await formatOp;
+
+  assert.equal(harness.context.__formatControllers.has(2), false);
+  assert.equal(harness.context.__transcriptControllers.has(1), true);
+  assert.equal(harness.context.__isKeepAliveRunning(), true, 'transcript on tab 1 must keep the interval running');
+
+  await harness.context.handleStop();
+  await transcriptOp;
+  assert.equal(harness.context.__isKeepAliveRunning(), false);
+});
+
+test('keepalive case 5: translate abort-and-replace keeps the interval for the newer controller', async () => {
+  const router = deferredFetchQueue();
+  const harness = createBackgroundHarness({ fetch: router.fetch });
+
+  const first = harness.context.handleTranslateStart({ tabId: 7, text: 'one', language: 'French' });
+  await waitFor(() => router.count('/translate') === 1, 'first translate fetch did not start');
+  assert.equal(harness.context.__isKeepAliveRunning(), true);
+  const firstController = harness.context.__translateControllers.get(7);
+
+  const second = harness.context.handleTranslateStart({ tabId: 7, text: 'two', language: 'German' });
+  await waitFor(() => router.count('/translate') === 2, 'second translate fetch did not start');
+  assert.equal(firstController.signal.aborted, true);
+  assert.equal(harness.context.__translateControllers.has(7), true);
+
+  const firstResult = await first;
+  assert.equal(firstResult.ok, true);
+  assert.equal(harness.context.__translateControllers.has(7), true, 'stale finally must not delete the newer controller');
+  assert.equal(harness.context.__isKeepAliveRunning(), true, 'stale finally must not stop the interval');
+
+  router.resolve('/translate', jsonResponse({ text: 'ZWEI' }), 1);
+  const secondResult = await second;
+  assert.equal(secondResult.ok, true);
+  assert.equal(harness.context.__translateControllers.has(7), false);
+  assert.equal(harness.context.__isKeepAliveRunning(), false);
+});
+
+test('keepalive case 6: handleStop aborts the transcript and stops the interval once the handler unwinds', async () => {
+  const router = deferredFetchQueue();
+  const harness = createBackgroundHarness({ fetch: router.fetch });
+
+  const operation = harness.context.handleStart({ url: 'https://example.com/v' });
+  await waitFor(() => router.count('/transcript') === 1, 'transcript fetch did not start');
+  assert.equal(harness.context.__isKeepAliveRunning(), true);
+
+  await harness.context.handleStop();
+  const result = await operation;
+
+  assert.equal(result.ok, true);
+  assert.equal(harness.context.__transcriptControllers.has(1), false);
+  assert.equal(harness.context.__isKeepAliveRunning(), false);
+  const state = harness.context.__states.get(1);
+  assert.equal(state.status, 'Error');
+  assert.match(state.error, /Stopped by user/);
+});
+
+test('keepalive case 7: format abort-and-replace keeps the interval for the newer controller', async () => {
+  const router = deferredFetchQueue();
+  const harness = createBackgroundHarness({ fetch: router.fetch });
+
+  const first = harness.context.handleFormatStart({ tabId: 3, text: 'first' });
+  await waitFor(() => router.count('/format') === 1, 'first format fetch did not start');
+  assert.equal(harness.context.__isKeepAliveRunning(), true);
+  const firstController = harness.context.__formatControllers.get(3);
+
+  const second = harness.context.handleFormatStart({ tabId: 3, text: 'second' });
+  await waitFor(() => router.count('/format') === 2, 'second format fetch did not start');
+  assert.equal(firstController.signal.aborted, true);
+
+  const firstResult = await first;
+  assert.equal(firstResult.ok, true);
+  assert.equal(harness.context.__formatControllers.has(3), true, 'stale finally must not delete the newer controller');
+  assert.equal(harness.context.__isKeepAliveRunning(), true, 'stale finally must not stop the interval');
+
+  router.resolve('/format', jsonResponse({ text: 'SECOND' }), 1);
+  const secondResult = await second;
+  assert.equal(secondResult.ok, true);
+  assert.equal(harness.context.__formatControllers.has(3), false);
+  assert.equal(harness.context.__isKeepAliveRunning(), false);
+});
+
+test('keepalive case 8: auto-translate chain has no keepalive gap across the format→translate handoff', async () => {
+  const router = deferredFetchQueue();
+  const harness = createBackgroundHarness({
+    syncValues: { yt2txtAutoTranslate: true, tl2Language: 'French' },
+    fetch: router.fetch,
+  });
+
+  // Count actual stops: stopKeepAlive only calls clearInterval while the interval is running.
+  let stopCount = 0;
+  const realClearInterval = harness.context.clearInterval;
+  harness.context.clearInterval = (id) => {
+    stopCount += 1;
+    return realClearInterval(id);
+  };
+
+  const operation = harness.context.handleStart({ url: 'https://example.com/v' });
+  await waitFor(() => router.count('/transcript') === 1, 'transcript fetch did not start');
+  router.resolve('/transcript', jsonResponse({ text: 'TRANSCRIPT', source: 'subtitles' }));
+
+  await waitFor(() => router.count('/format') === 1, 'auto-format fetch did not start');
+  router.resolve('/format', jsonResponse({ text: 'FORMATTED' }));
+
+  await waitFor(() => router.count('/translate') === 1, 'auto-translate fetch did not start');
+  // Translate is registered synchronously inside autoTranslate, before format's finally
+  // runs; that ordering is asserted through stopCount below (format's finally sync must
+  // not be the one that stops the interval).
+  assert.equal(harness.context.__translateControllers.has(1), true);
+  assert.equal(harness.context.__isKeepAliveRunning(), true);
+  // One stop is expected earlier: transcript→format handoff (transcript entry deleted
+  // before the format controller registers). No *second* stop may happen here.
+  assert.equal(stopCount, 1, 'keepalive must not stop during the format→translate handoff');
+
+  await operation;
+  assert.equal(harness.context.__isKeepAliveRunning(), true, 'translate must still keep the interval running');
+  assert.equal(stopCount, 1);
+
+  router.resolve('/translate', jsonResponse({ text: 'TRADUIT' }));
+  await waitFor(
+    () => !harness.context.__isKeepAliveRunning() && !harness.context.__translateControllers.has(1),
+    'keepalive did not stop after auto-translate completed'
+  );
+  assert.equal(stopCount, 2, 'exactly one stop per idle transition (transcript→format, translate→idle)');
+});
+
+test('keepalive case 9: tab close mid-transcript aborts, cleans up, and stops the interval', async () => {
+  const router = deferredFetchQueue();
+  const harness = createBackgroundHarness({ fetch: router.fetch });
+
+  const operation = harness.context.handleStart({ url: 'https://example.com/v' });
+  await waitFor(() => router.count('/transcript') === 1, 'transcript fetch did not start');
+  assert.equal(harness.context.__isKeepAliveRunning(), true);
+
+  harness.onTabRemoved.emit(1);
+
+  assert.equal(harness.context.__transcriptControllers.has(1), false);
+  assert.equal(harness.context.__isKeepAliveRunning(), false);
+
+  const result = await operation;
+  assert.equal(result.ok, true);
+  assert.equal(harness.context.__transcriptControllers.has(1), false);
+  // The aborted handler's finally re-syncs; must stay stopped (idempotent).
+  assert.equal(harness.context.__isKeepAliveRunning(), false);
 });
