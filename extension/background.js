@@ -175,6 +175,7 @@ function broadcastState(tabId) {
 // ── Translation / Format controllers ────────────────────────────
 const translateControllers = new Map();
 const formatControllers = new Map();
+const transcriptControllers = new Map();
 let keepAliveIntervalId = null;
 
 function startKeepAlive() {
@@ -190,15 +191,26 @@ function stopKeepAlive() {
   keepAliveIntervalId = null;
 }
 
+function syncKeepAlive() {
+  const hasWork =
+    transcriptControllers.size > 0 ||
+    formatControllers.size > 0 ||
+    translateControllers.size > 0;
+  if (hasWork) startKeepAlive();
+  else stopKeepAlive();
+}
+
 // ── Clean up on tab close ───────────────────────────────────────
 chrome.tabs.onRemoved.addListener((tabId) => {
-  const state = states.get(tabId);
-  if (state?.controller) {
-    state.controller.abort();
+  const transcriptController = transcriptControllers.get(tabId);
+  if (transcriptController) {
+    transcriptController.abort();
   }
+  transcriptControllers.delete(tabId);
   handleTranslateStop(tabId);
   handleFormatStop(tabId);
   states.delete(tabId);
+  syncKeepAlive();
   chrome.storage.local
     .remove([
       `transcript:${tabId}`,
@@ -321,29 +333,31 @@ async function handleStart(msg) {
   }
 
   const state = getState(tab.id);
-  if (state.active) {
+  if (state.active || transcriptControllers.has(tab.id)) {
     return { ok: false, error: 'A transcript extraction is already in progress.' };
   }
 
   // Create AbortController
   const controller = new AbortController();
-  state.controller = controller;
-
-  resetState(tab.id);
-  updateState(tab.id, {
-    active: true,
-    status: 'Processing',
-    progress: 'Checking for subtitles...',
-  });
+  transcriptControllers.set(tab.id, controller);
+  syncKeepAlive();
 
   let timedOut = false;
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, TRANSCRIPT_TIMEOUT_MS);
-
+  let timeoutId = null;
   let resultText = '';
   try {
+    resetState(tab.id);
+    updateState(tab.id, {
+      active: true,
+      status: 'Processing',
+      progress: 'Checking for subtitles...',
+    });
+
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, TRANSCRIPT_TIMEOUT_MS);
+
     const baseUrl = await getYt2txtEndpoint('/transcript');
     const url = `${baseUrl}?_=${Date.now()}`;
 
@@ -406,7 +420,10 @@ async function handleStart(msg) {
     }
   } finally {
     clearTimeout(timeoutId);
-    state.controller = null;
+    if (transcriptControllers.get(tab.id) === controller) {
+      transcriptControllers.delete(tab.id);
+    }
+    syncKeepAlive();
     // Don't clear transcript on error — keep whatever was collected
   }
 
@@ -432,8 +449,9 @@ async function handleStop() {
   const state = getState(tab.id);
 
   state.stopRequested = true;
-  if (state.controller) {
-    state.controller.abort();
+  const controller = transcriptControllers.get(tab.id);
+  if (controller) {
+    controller.abort();
   }
   handleTranslateStop(tab.id);
   handleFormatStop(tab.id);
@@ -547,7 +565,7 @@ async function handleTranslateStart(msg) {
         .sendMessage({ type: 'tl2:translating', tabId, value: false })
         .catch(() => {});
     }
-    if (translateControllers.size === 0 && formatControllers.size === 0) stopKeepAlive();
+    syncKeepAlive();
   }
 
   return { ok: true };
@@ -560,6 +578,7 @@ function handleTranslateStop(tabId) {
     controller.abort();
     translateControllers.delete(tabId);
   }
+  syncKeepAlive();
   chrome.storage.local.remove(`tl2Translating:${tabId}`);
   chrome.runtime
     .sendMessage({ type: 'tl2:translating', tabId, value: false })
@@ -670,7 +689,7 @@ async function handleFormatStart(msg) {
     if (formatControllers.get(tabId) === controller) {
       formatControllers.delete(tabId);
     }
-    if (translateControllers.size === 0 && formatControllers.size === 0) stopKeepAlive();
+    syncKeepAlive();
   }
   return { ok: true };
 }
@@ -681,6 +700,7 @@ function handleFormatStop(tabId) {
     controller.abort();
     formatControllers.delete(tabId);
   }
+  syncKeepAlive();
   const state = states.get(tabId);
   if (state?.format?.active) {
     state.format.active = false;

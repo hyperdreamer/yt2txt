@@ -107,7 +107,7 @@ User clicks "Translate" in popup
     1. Validate: tabId and text present
     2. Abort any in-flight translation for this tab (handleTranslateStop)
     3. Create new AbortController → translateControllers.set(tabId, controller)
-    4. Start keepAlive (prevent SW termination)
+    4. Start keepAlive (idempotent; the interval runs while any of transcriptControllers, formatControllers, translateControllers is non-empty)
     5. Persist state: tl2Translating:{tabId}=true
     6. Broadcast { type: 'tl2:translating', tabId, value: true }
     7. Handle "original" language → pass-through (no API call, no prompt)
@@ -126,10 +126,10 @@ User clicks "Translate" in popup
         - Update state.translate.error = error message
         - Broadcast error
     13. Finally:
-        - Remove controller from translateControllers
+        - Remove controller from translateControllers (identity-guarded)
         - Remove tl2Translating:{tabId}
         - Broadcast { type: 'tl2:translating', tabId, value: false }
-        - If no controllers active: stopKeepAlive
+        - syncKeepAlive() — stops the interval only when transcriptControllers, formatControllers, and translateControllers are all empty
 
   → popup.js: receives 'translation:update' message
     - Update tl2Result textarea
@@ -157,7 +157,7 @@ User clicks "Format" in popup
     1. Validate: tabId and text present
     2. Abort any in-flight format for this tab (handleFormatStop)
     3. Create new AbortController → formatControllers.set(tabId, controller)
-    4. Start keepAlive
+    4. Start keepAlive (idempotent; the interval runs while any of transcriptControllers, formatControllers, translateControllers is non-empty)
     5. Update state.format (sourceText, resultText='', active=true, status='Formatting...', error='')
     6. Broadcast state:update (popup picks up format state from state.format)
     7. Resolve TextKit host/port via getTextkitEndpoint('/format')
@@ -169,7 +169,7 @@ User clicks "Format" in popup
         - If text: fmtAutoCopyIfEnabled(text), fmtAutoSaveIfEnabled(text)
         - Trigger autoTranslate if enabled
     10. On abort/error: update state.format.error/status, broadcast state:update
-    11. Finally: remove controller, stopKeepAlive if idle
+    11. Finally: remove controller (identity-guarded); syncKeepAlive()
 
   → popup.js: receives state:update → renderState() updates format tab from state.format
 ```
@@ -244,7 +244,6 @@ Extend the existing `states` Map to include new fields:
   transcript: '',         // last transcript result
   error: '',
   stopRequested: false,
-  controller: null,       // AbortController for transcript fetch
 }
 
 // NEW fields — unified Format and Translate sub-states:
@@ -306,11 +305,13 @@ Extend the existing `states` Map to include new fields:
 
 ```javascript
 chrome.tabs.onRemoved.addListener((tabId) => {
-  const state = states.get(tabId);
-  if (state?.controller) state.controller.abort();
+  const transcriptController = transcriptControllers.get(tabId);
+  if (transcriptController) transcriptController.abort();
+  transcriptControllers.delete(tabId);
   handleTranslateStop(tabId);
   handleFormatStop(tabId);
   states.delete(tabId);
+  syncKeepAlive();
   chrome.storage.local
     .remove([
       `transcript:${tabId}`,
@@ -370,6 +371,17 @@ handleStart() completes successfully
         On success → stores fmtResult:{tabId}, broadcasts state:update
         On failure → broadcasts state:update with error (no translate)
 ```
+
+**Keepalive:** `handleStart()` registers its transcript AbortController in
+`transcriptControllers` and calls `syncKeepAlive()` for the duration of the
+`POST /transcript` fetch. The entry is removed in the handler's `finally`
+(identity-guarded) and `syncKeepAlive()` is called again, so the interval runs
+exactly while at least one of `transcriptControllers` / `formatControllers` /
+`translateControllers` is non-empty. Because auto-format starts after that
+`finally`, the interval may stop and restart across the transcript→format
+handoff (one storage round-trip; harmless). The format→translate handoff is
+gap-free when auto-translate is enabled because the translate entry is
+registered synchronously before format's `finally`.
 
 ### 5.2 Trigger: Translation completes
 
@@ -437,6 +449,11 @@ if (resultText) {
 ```
 
 `handleFormatStart` resolves the TextKit host/port internally via `getTextkitEndpoint('/format')`.
+Keepalive accounting matches the other operations: `handleStart`'s `finally`
+deletes its `transcriptControllers` entry (identity-guarded) and calls
+`syncKeepAlive()`; `handleFormatStart` registers its format controller and
+calls `startKeepAlive()` before awaiting the request. See §5.1 for the
+handoff semantics.
 
 ---
 
@@ -620,7 +637,7 @@ if (!items.textkitHost) items.textkitHost = items.yt2txtHost;
 
 ### 8.6 SW termination during operation
 
-- `keepAliveIntervalId` prevents SW termination while any operation is in-flight
+- `keepAliveIntervalId` prevents SW termination while any of `transcriptControllers`, `formatControllers`, or `translateControllers` is non-empty (kept in sync by `syncKeepAlive()`)
 - All progress state is persisted to `chrome.storage.local` before starting.
 - On popup reopen, `init()` reads `tl2Translating:{tabId}` to restore "Stop" button state for translation.
 - Format progress is tracked in-memory via `state.format.active` and restored from the `states` Map via `popup:get-state`.
@@ -650,7 +667,7 @@ each with 60-second cache expiry. Both use `buildBackendEndpoint()` + `normalize
 
 **State management:**
 | `states` Map: per-tab state including transcript, format, and translate sub-states
-| `translateControllers` / `formatControllers` Maps: separate AbortController per tab per operation
+| `transcriptControllers` / `translateControllers` / `formatControllers` Maps: separate AbortController per tab per operation (the interval runs while any is non-empty; `syncKeepAlive()` maintains the accounting)
 | `keepAliveIntervalId`: prevents SW termination during long operations
 
 **Auto-action triggers:**
