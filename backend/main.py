@@ -66,6 +66,12 @@ class TimeoutConfig:
 
 
 @dataclass(frozen=True)
+class LocalFilesConfig:
+    """Local-file input settings loaded from the local_files section."""
+
+    allowed_roots: tuple[Path, ...] = ()
+
+@dataclass(frozen=True)
 class AppConfig:
     """Application settings loaded from YAML and environment variables."""
 
@@ -78,6 +84,7 @@ class AppConfig:
     timeout: TimeoutConfig = TimeoutConfig()
     cache_enabled: bool = True
     cache_ttl_days: int = 30
+    local_files: LocalFilesConfig = LocalFilesConfig()
 
 
 TIMEOUT_RANGES: dict[str, tuple[float, float]] = {
@@ -132,6 +139,46 @@ def _parse_timeout_config(raw_timeout: Any) -> TimeoutConfig:
     )
 
 
+def _parse_local_files_config(raw_local_files: Any) -> LocalFilesConfig:
+    """Parse and validate the local_files section from YAML.
+
+    Missing section → unrestricted (empty tuple).  A non-mapping section,
+    unknown keys, a non-list ``allowed_roots``, non-string/empty entries, and
+    entries that are not absolute after ``expanduser`` all raise RuntimeError.
+    """
+    if raw_local_files is None:
+        return LocalFilesConfig()
+    if not isinstance(raw_local_files, dict):
+        raise RuntimeError("local_files must be a mapping")
+
+    unknown = set(raw_local_files) - {"allowed_roots"}
+    if unknown:
+        names = ", ".join(sorted(map(str, unknown)))
+        raise RuntimeError(f"Unknown local_files setting(s): {names}")
+
+    raw_roots = raw_local_files.get("allowed_roots", [])
+    if not isinstance(raw_roots, list):
+        raise RuntimeError(
+            "local_files.allowed_roots must be a list, "
+            f"got {type(raw_roots).__name__}"
+        )
+
+    roots: list[Path] = []
+    for entry in raw_roots:
+        if not isinstance(entry, str) or not entry.strip():
+            raise RuntimeError(
+                "local_files.allowed_roots entries must be non-empty strings"
+            )
+        expanded = Path(entry).expanduser()
+        if not expanded.is_absolute():
+            raise RuntimeError(
+                "local_files.allowed_roots entry must be absolute after "
+                f"expansion: {entry}"
+            )
+        roots.append(expanded.resolve())
+    return LocalFilesConfig(allowed_roots=tuple(roots))
+
+
 def load_config() -> AppConfig:
     """Load configuration from config.yaml with env-var fallbacks."""
     raw = _load_yaml_config()
@@ -172,6 +219,7 @@ def load_config() -> AppConfig:
         timeout=_parse_timeout_config(ai_section.get("timeout")),
         cache_enabled=bool(cache_section.get("enabled", True)),
         cache_ttl_days=int(cache_section.get("ttl_days", 30)),
+        local_files=_parse_local_files_config(raw.get("local_files")),
     )
     global _debug_enabled
     _debug_enabled = config.debug
