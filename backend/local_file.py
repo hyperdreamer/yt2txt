@@ -445,3 +445,113 @@ async def prepare(
     )
 
 
+# ── Subtitle cascade ────────────────────────────────────────────
+
+
+async def try_subtitles(
+    target: LocalTarget, allowed_roots: tuple[Path, ...], debug: Logger
+) -> tuple[str, str] | None:
+    """Return ``(text, model)`` from sidecar/embedded subtitles, or None.
+
+    ``model`` is ``"sidecar"`` or ``"ffmpeg"``.  Subtitle problems never
+    fail the request: the caller falls through to audio extraction.
+    """
+    usable = _first_usable_sidecar(
+        _discover_sidecars(target.path, allowed_roots, debug), debug
+    )
+    if usable is not None:
+        debug("local", f"using sidecar subtitles: {usable[0]}")
+        return usable[1], "sidecar"
+
+    for candidate in target.streams.subtitle_candidates:
+        if not is_text_subtitle_codec(candidate.codec_name):
+            debug(
+                "local",
+                "skipping non-text subtitle stream "
+                f"index={candidate.index} codec={candidate.codec_name!r}",
+            )
+            continue
+        cmd = [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-i",
+            str(target.path),
+            "-map",
+            f"0:{candidate.index}",
+            "-f",
+            "srt",
+            "-",
+        ]
+        try:
+            returncode, stdout, stderr = await _run_bounded(
+                cmd, timeout=EMBEDDED_SUBTITLE_TIMEOUT, debug=debug
+            )
+        except FileNotFoundError:
+            raise HTTPException(status_code=500, detail="ffmpeg is not installed.")
+        except asyncio.TimeoutError:
+            debug(
+                "local",
+                "timed out extracting subtitle "
+                f"stream index={candidate.index}",
+            )
+            continue
+        if returncode != 0:
+            err = stderr.decode("utf-8", errors="replace").strip()
+            debug(
+                "local",
+                "subtitle extraction failed for "
+                f"index={candidate.index}: {err[:300]}",
+            )
+            continue
+        text = parse_subtitle_text(stdout.decode("utf-8", errors="replace"))
+        if not text:
+            debug("local", f"subtitle stream index={candidate.index} yielded no text")
+            continue
+        debug("local", f"using embedded subtitle stream index={candidate.index}")
+        return text, "ffmpeg"
+
+    return None
+
+
+# ── Audio extraction ────────────────────────────────────────────
+
+
+async def extract_audio(target: LocalTarget, tmpdir: str, debug: Logger) -> str:
+    """Extract the first audio stream to a 64 kbps mono mp3 in *tmpdir*."""
+    out_path = os.path.join(tmpdir, f"{target.path.stem}.mp3")
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-y",
+        "-i",
+        str(target.path),
+        "-vn",
+        "-sn",
+        "-dn",
+        "-map",
+        "0:a:0",
+        "-b:a",
+        "64k",
+        "-ac",
+        "1",
+        out_path,
+    ]
+    try:
+        returncode, _stdout, stderr = await _run_bounded(
+            cmd, timeout=AUDIO_EXTRACTION_TIMEOUT, debug=debug
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="ffmpeg is not installed.")
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Timed out extracting audio from {target.path}",
+        )
+    if returncode != 0:
+        err = stderr.decode("utf-8", errors="replace")[:300]
+        raise HTTPException(status_code=400, detail=f"Failed to extract audio: {err}")
+    return out_path

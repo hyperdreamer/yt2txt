@@ -292,6 +292,110 @@ class TestAccessPolicy:
         assert exc.value.status_code == 500
         assert exc.value.detail == "ffmpeg is not installed."
 
+    def test_symlinked_sidecar_escaping_roots_is_skipped(self, video, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        shutil.copy(video, root / "v.mp4")
+        escaping = tmp_path / "outside" / "v.srt"
+        escaping.parent.mkdir()
+        write_srt(escaping, "ESCAPED")
+        (root / "v.srt").symlink_to(escaping)
+        target = run(local_file.prepare(str(root / "v.mp4"), (root.resolve(),), DBG))
+        assert target is not None
+        assert "outside" not in target.sidecar_fingerprint
+        assert run(local_file.try_subtitles(target, (root.resolve(),), DBG)) is None
+
+
+# ── Usability gate ──────────────────────────────────────────────
+
+
+class TestUsabilityGate:
+    def test_no_audio_no_subs_400(self, tmp_path):
+        path = tmp_path / "silent.mp4"
+        make_video(path, audio=False)
+        with pytest.raises(HTTPException) as exc:
+            run(local_file.prepare(str(path), (), DBG))
+        assert exc.value.status_code == 400
+        assert exc.value.detail == f"No audio or subtitle stream found in: {path.resolve()}"
+
+    def test_no_audio_with_usable_sidecar_passes(self, tmp_path):
+        path = tmp_path / "silent.mp4"
+        make_video(path, audio=False)
+        write_srt(path.with_suffix(".srt"), "Sidecar only")
+        for roots in ((), (tmp_path.resolve(),)):
+            target = run(local_file.prepare(str(path), roots, DBG))
+            assert target is not None
+            assert run(local_file.try_subtitles(target, roots, DBG)) == (
+                "Sidecar only",
+                "sidecar",
+            )
+
+    def test_no_audio_with_only_empty_sidecar_400(self, tmp_path):
+        path = tmp_path / "silent.mp4"
+        make_video(path, audio=False)
+        path.with_suffix(".srt").write_text("   \n\n", encoding="utf-8")
+        with pytest.raises(HTTPException) as exc:
+            run(local_file.prepare(str(path), (), DBG))
+        assert exc.value.status_code == 400
+        assert exc.value.detail == f"No audio or subtitle stream found in: {path.resolve()}"
+
+    def test_failed_probe_passes_gate_optimistically(self, tmp_path, monkeypatch):
+        path = tmp_path / "silent.mp4"
+        make_video(path, audio=False)
+
+        async def fake_probe(path_str, debug):
+            return local_file.StreamProbe(ok=False, has_audio=None, subtitle_candidates=())
+
+        monkeypatch.setattr(local_file, "probe_streams", fake_probe)
+        target = run(local_file.prepare(str(path), (), DBG))
+        assert target is not None
+        assert target.streams.ok is False
+        assert run(local_file.try_subtitles(target, (), DBG)) is None
+        # Extraction is the authoritative check and reports the real ffmpeg error.
+        with pytest.raises(HTTPException) as exc:
+            run(local_file.extract_audio(target, str(tmp_path), DBG))
+        assert exc.value.status_code == 400
+        assert exc.value.detail.startswith("Failed to extract audio:")
+
+
+# ── Stream probe failure modes ──────────────────────────────────
+
+
+class TestStreamProbeUnknownModes:
+    """The real probe_streams maps every failure mode to streams-unknown."""
+
+    @pytest.mark.parametrize("mode", ["nonzero", "unparseable", "timeout"])
+    def test_failure_modes_are_streams_unknown_and_gate_is_optimistic(
+        self, tmp_path, monkeypatch, mode
+    ):
+        path = tmp_path / "silent.mp4"
+        make_video(path, audio=False)
+        real_run_bounded = local_file._run_bounded
+
+        async def fake_run(cmd, *, timeout, debug):
+            if mode == "nonzero":
+                return 1, b"", b"boom"
+            if mode == "unparseable":
+                return 0, b"not json", b""
+            raise asyncio.TimeoutError
+
+        monkeypatch.setattr(local_file, "_run_bounded", fake_run)
+        probe = run(local_file.probe_streams(str(path), DBG))
+        assert probe == local_file.StreamProbe(
+            ok=False, has_audio=None, subtitle_candidates=()
+        )
+        target = run(local_file.prepare(str(path), (), DBG))
+        assert target is not None
+        assert target.streams.ok is False
+        # Restore the real runner so extraction runs ffmpeg and the gate's
+        # optimistic acceptance is proven by the real failure it surfaces.
+        monkeypatch.setattr(local_file, "_run_bounded", real_run_bounded)
+        with pytest.raises(HTTPException) as exc:
+            run(local_file.extract_audio(target, str(tmp_path), DBG))
+        assert exc.value.status_code == 400
+        assert exc.value.detail.startswith("Failed to extract audio:")
+
+
 # ── Cache key ───────────────────────────────────────────────────
 
 
@@ -385,4 +489,233 @@ class TestCacheKey:
         assert second.size == first.size + 64
         assert second.mtime_ns == first.mtime_ns
         assert second.cache_key != first.cache_key
+
+# ── Sidecar cascade ─────────────────────────────────────────────
+
+
+class TestSidecarCascade:
+    def test_srt_preferred_over_vtt(self, video):
+        write_srt(video.parent / "video.srt", "SRT text")
+        (video.parent / "video.vtt").write_text(
+            "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nVTT text\n", encoding="utf-8"
+        )
+        target = run(local_file.prepare(str(video), (), DBG))
+        assert run(local_file.try_subtitles(target, (), DBG)) == ("SRT text", "sidecar")
+
+    def test_english_variant_beats_alphabetically_earlier_tag(self, video):
+        write_srt(video.parent / "video.de.srt", "Deutsch")
+        write_srt(video.parent / "video.en.srt", "English")
+        target = run(local_file.prepare(str(video), (), DBG))
+        # `de` sorts before `en`, so the group preference is what puts en first.
+        assert local_file._discover_sidecars(target.path, (), DBG) == [
+            (video.parent / "video.en.srt").resolve(),
+            (video.parent / "video.de.srt").resolve(),
+        ]
+        assert run(local_file.try_subtitles(target, (), DBG)) == ("English", "sidecar")
+
+    def test_uppercase_extension_matched(self, video):
+        write_srt(video.parent / "video.SRT", "Upper text")
+        target = run(local_file.prepare(str(video), (), DBG))
+        assert run(local_file.try_subtitles(target, (), DBG)) == ("Upper text", "sidecar")
+
+    def test_empty_sidecar_falls_through(self, video):
+        video.with_suffix(".srt").write_text("   \n", encoding="utf-8")
+        target = run(local_file.prepare(str(video), (), DBG))
+        assert run(local_file.try_subtitles(target, (), DBG)) is None
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can read chmod 000 files")
+    def test_unreadable_sidecar_falls_through(self, video):
+        sidecar = video.with_suffix(".srt")
+        write_srt(sidecar)
+        os.chmod(sidecar, 0o000)
+        try:
+            target = run(local_file.prepare(str(video), (), DBG))
+            assert run(local_file.try_subtitles(target, (), DBG)) is None
+        finally:
+            os.chmod(sidecar, 0o644)
+
+
+# ── Embedded cascade ────────────────────────────────────────────
+
+
+class TestEmbeddedCascade:
+    def test_text_subtitle_extracted(self, tmp_path):
+        srt = tmp_path / "subs.srt"
+        write_srt(srt, "Embedded hello")
+        path = tmp_path / "out.mkv"
+        make_mkv_with_subtitle(path, srt)
+        target = run(local_file.prepare(str(path), (), DBG))
+        assert run(local_file.try_subtitles(target, (), DBG)) == (
+            "Embedded hello",
+            "ffmpeg",
+        )
+
+    def test_global_stream_index_differs_from_ordinal(self, tmp_path):
+        srt = tmp_path / "subs.srt"
+        write_srt(srt, "Global index text")
+        path = tmp_path / "out.mkv"
+        make_mkv_with_subtitle(path, srt, audio_before_subtitle=True)
+        target = run(local_file.prepare(str(path), (), DBG))
+        candidates = target.streams.subtitle_candidates
+        # subtitle global index is 2 while its subtitle ordinal is 0
+        assert [candidate.index for candidate in candidates] == [2]
+        assert run(local_file.try_subtitles(target, (), DBG)) == (
+            "Global index text",
+            "ffmpeg",
+        )
+
+    def test_subtitle_before_audio_uses_global_index(self, tmp_path):
+        srt = tmp_path / "subs.srt"
+        write_srt(srt, "Subtitle before audio")
+        path = tmp_path / "out2.mkv"
+        make_mkv_with_subtitle(path, srt, audio_before_subtitle=False)
+        target = run(local_file.prepare(str(path), (), DBG))
+        # subtitle global index is 1 while its subtitle ordinal is 0
+        assert [candidate.index for candidate in target.streams.subtitle_candidates] == [1]
+        assert run(local_file.try_subtitles(target, (), DBG)) == (
+            "Subtitle before audio",
+            "ffmpeg",
+        )
+
+    def test_english_track_preferred_over_lower_index_other_language(self, tmp_path):
+        srt_de = tmp_path / "de.srt"
+        srt_en = tmp_path / "en.srt"
+        write_srt(srt_de, "Deutscher Text")
+        write_srt(srt_en, "English text")
+        path = tmp_path / "two.mkv"
+        make_mkv_with_two_subtitles(path, srt_de, srt_en, languages=("deu", "eng"))
+        target = run(local_file.prepare(str(path), (), DBG))
+        assert [
+            candidate.language for candidate in target.streams.subtitle_candidates
+        ] == ["eng", "deu"]
+        assert run(local_file.try_subtitles(target, (), DBG)) == (
+            "English text",
+            "ffmpeg",
+        )
+
+    def test_is_text_subtitle_codec_predicate(self):
+        for codec in ("subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text", "ttml"):
+            assert local_file.is_text_subtitle_codec(codec) is True
+        for codec in (
+            "hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle",
+            "xsub", "eia_608", "dvb_teletext", "",
+        ):
+            assert local_file.is_text_subtitle_codec(codec) is False
+
+    @staticmethod
+    def _fake_target(path: Path, candidates):
+        return local_file.LocalTarget(
+            raw=str(path),
+            path=path,
+            sidecar_fingerprint="-",
+            cache_key="local:0000000000000000:0000000000000000",
+            size=1,
+            mtime_ns=1,
+            streams=local_file.StreamProbe(
+                ok=True, has_audio=True, subtitle_candidates=tuple(candidates)
+            ),
+        )
+
+    def test_empty_stream_output_tries_next_candidate(self, tmp_path, monkeypatch):
+        path = tmp_path / "video.mp4"
+        make_video(path)
+        target = self._fake_target(
+            path,
+            [
+                local_file.StreamCandidate(1, "subrip", "eng"),
+                local_file.StreamCandidate(3, "subrip", "und"),
+            ],
+        )
+        calls = []
+
+        async def fake_run(cmd, *, timeout, debug):
+            calls.append(cmd)
+            if len(calls) == 1:
+                return 0, b"", b""
+            return 0, b"1\n00:00:00,000 --> 00:00:01,000\nSecond\n", b""
+
+        monkeypatch.setattr(local_file, "_run_bounded", fake_run)
+        assert run(local_file.try_subtitles(target, (), DBG)) == ("Second", "ffmpeg")
+        assert len(calls) == 2
+        assert "-map" in calls[1] and "0:3" in calls[1]
+
+    def test_nonzero_exit_falls_through(self, tmp_path, monkeypatch):
+        path = tmp_path / "video.mp4"
+        make_video(path)
+        target = self._fake_target(
+            path, [local_file.StreamCandidate(1, "subrip", "eng")]
+        )
+
+        async def fake_run(cmd, *, timeout, debug):
+            return 1, b"", b"boom"
+
+        monkeypatch.setattr(local_file, "_run_bounded", fake_run)
+        assert run(local_file.try_subtitles(target, (), DBG)) is None
+
+    def test_failed_probe_yields_no_embedded_candidates(self, tmp_path, monkeypatch):
+        path = tmp_path / "video.mp4"
+        make_video(path)
+
+        async def fake_probe(path_str, debug):
+            return local_file.StreamProbe(ok=False, has_audio=None, subtitle_candidates=())
+
+        monkeypatch.setattr(local_file, "probe_streams", fake_probe)
+        target = run(local_file.prepare(str(path), (), DBG))
+        assert target.streams.subtitle_candidates == ()
+        assert run(local_file.try_subtitles(target, (), DBG)) is None
+
+
+# ── Audio extraction ────────────────────────────────────────────
+
+
+class TestAudioExtraction:
+    def test_produced_mp3_is_mono_64k_audio_only(self, video, tmp_path):
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        target = run(local_file.prepare(str(video), (), DBG))
+        audio_path = run(local_file.extract_audio(target, str(out_dir), DBG))
+        probe = subprocess.run(
+            [
+                FFPROBE, "-v", "error",
+                "-show_entries", "stream=codec_name,channels,bit_rate",
+                "-of", "json", audio_path,
+            ],
+            check=True, capture_output=True, text=True,
+        )
+        import json
+
+        streams = json.loads(probe.stdout)["streams"]
+        assert len(streams) == 1
+        assert streams[0]["codec_name"] == "mp3"
+        assert streams[0]["channels"] == 1
+        assert streams[0]["bit_rate"] == "64000"
+
+    def test_extraction_timeout_504(self, video, tmp_path, monkeypatch):
+        async def fake_run(cmd, *, timeout, debug):
+            raise asyncio.TimeoutError
+
+        monkeypatch.setattr(local_file, "_run_bounded", fake_run)
+        target = run(local_file.prepare(str(video), (), DBG))
+        with pytest.raises(HTTPException) as exc:
+            run(local_file.extract_audio(target, str(tmp_path), DBG))
+        assert exc.value.status_code == 504
+        assert exc.value.detail == f"Timed out extracting audio from {video.resolve()}"
+
+    def test_extraction_nonzero_exit_400(self, tmp_path):
+        path = tmp_path / "silent.mp4"
+        make_video(path, audio=False)
+        target = local_file.LocalTarget(
+            raw=str(path),
+            path=path,
+            sidecar_fingerprint="-",
+            cache_key="local:0000000000000000:0000000000000000",
+            size=1,
+            mtime_ns=1,
+            streams=local_file.StreamProbe(ok=False, has_audio=None, subtitle_candidates=()),
+        )
+        with pytest.raises(HTTPException) as exc:
+            run(local_file.extract_audio(target, str(tmp_path), DBG))
+        assert exc.value.status_code == 400
+        assert exc.value.detail.startswith("Failed to extract audio:")
+
 
