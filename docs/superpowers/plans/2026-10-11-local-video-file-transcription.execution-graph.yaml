@@ -1,0 +1,396 @@
+schema_version: 1
+generated_at: '2026-10-12T01:09:41Z'
+run_id: pm-run-20261011-114932-0005f5e8
+source_plan:
+  path: docs/superpowers/plans/2026-10-11-local-video-file-transcription.md
+  sha256: 13f1aae546673774f9c8927d7fa002e77620dfab806024461e9beda59cc4bc90
+  commit_oid: 34692a3e399321710ebbfdf5013a76a0e46b7923
+  task_numbers:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+lanes:
+- id: backend
+  task_ids:
+  - T1
+  - T2
+  - T3
+  - T4
+- id: extension
+  task_ids:
+  - T5
+  - T6
+- id: docs
+  task_ids:
+  - T7
+  - T8
+tasks:
+- id: T1
+  plan_task: 1
+  title: '`local_files` configuration parser and config example'
+  lane: backend
+  sequence: 1
+  depends_on: []
+  implementer_tier: standard
+  ownership:
+  - backend/main.py
+  - backend/config.example.yaml
+  - tests/test_config.py
+  exclusive_resources: []
+  interfaces:
+    consumes:
+    - name: AppConfig
+      source: baseline:0e3834c8506a259dc2ec4252ecd8a48496161ae3
+      signature: AppConfig(host, port, debug, api_base, api_key, model, timeout, cache_enabled, cache_ttl_days)
+      digest: 72dcf3f8e77ba5dd0eeb30b30ff498bfd485013307c92fae25ae3a0f41098e95
+    - name: _load_yaml_config
+      source: baseline:0e3834c8506a259dc2ec4252ecd8a48496161ae3
+      signature: '_load_yaml_config(path: Path = CONFIG_PATH) -> dict[str, Any]'
+      digest: 6ea162591da1c23e8c492d9ef7f8ac9201099bbb0a1bde12ccb14bc32848608f
+    - name: _parse_timeout_config
+      source: baseline:0e3834c8506a259dc2ec4252ecd8a48496161ae3
+      signature: '_parse_timeout_config(raw_timeout: Any) -> TimeoutConfig'
+      digest: 9c411506cb2a80bd9a9b9aa6866aee7fa49fe1e7d4a4b12f9aa93b94c524c91d
+    - name: load_config
+      source: baseline:0e3834c8506a259dc2ec4252ecd8a48496161ae3
+      signature: load_config() -> AppConfig
+      digest: ffc5bd92a6af831f83395ce91c6b0ac18c2fb22ba0eb540d6c7e254a541b0841
+    produces:
+    - &id001
+      name: LocalFilesConfig
+      source: T1
+      signature: 'LocalFilesConfig(allowed_roots: tuple[Path, ...])'
+      digest: baca74e7e9425591fd7b3521e921dce833f99459babce73da38b3a67f61b245c
+    - name: _parse_local_files_config
+      source: T1
+      signature: '_parse_local_files_config(raw_local_files: Any) -> LocalFilesConfig'
+      digest: 0298e127f55d76ff038d86b93bc98be6add8429564928f8228537e92d2a3d9d4
+    - &id002
+      name: AppConfig.local_files
+      source: T1
+      signature: 'AppConfig.local_files: LocalFilesConfig'
+      digest: 21062534d8bbe6282df1ca4fadc5e90a1975e08a96a49909b0da4dd2e62fe227
+  validation:
+  - argv:
+    - /data/home/henry-arch/anaconda3/envs/daily/bin/python
+    - -m
+    - pytest
+    - tests/test_config.py
+    - -q
+- id: T2
+  plan_task: 2
+  title: '`local_file.py` core — classification through prepare'
+  lane: backend
+  sequence: 2
+  depends_on:
+  - T1
+  implementer_tier: fast
+  ownership:
+  - backend/local_file.py
+  - tests/test_local_file.py
+  exclusive_resources: []
+  interfaces:
+    consumes:
+    - *id001
+    - *id002
+    produces:
+    - &id013
+      name: Logger
+      source: T2
+      signature: Logger = Callable[[str, str], None]
+      digest: 390dc3161a0156ea3d9a796baa2d6ef0d0b57410b5bac173a637dca794e716bb
+    - &id005
+      name: StreamCandidate
+      source: T2
+      signature: 'StreamCandidate(index: int, codec_name: str, language: str | None)'
+      digest: ce0b6cecf58dd7c56304569e758f8a035bbec60abf1c9f574c8871a62b70e25b
+    - &id004
+      name: StreamProbe
+      source: T2
+      signature: 'StreamProbe(ok: bool, has_audio: bool | None, subtitle_candidates: tuple[StreamCandidate, ...])'
+      digest: 453e246d08e49cc8106c310a13610079032292368838b860e15b8c1ff22eb584
+    - &id003
+      name: LocalTarget
+      source: T2
+      signature: 'LocalTarget(raw: str, path: Path, sidecar_fingerprint: str, cache_key: str, size: int, mtime_ns: int, streams: StreamProbe)'
+      digest: c01f2da2263c6e705b9a2125829e2564648cc064fefae4ed12af4202c6d7b5d2
+    - name: classify
+      source: T2
+      signature: 'classify(raw: str) -> str'
+      digest: a8f6298c09e7f12222c8aad31a54872769504d65f7541ba9b703e864b63eed1e
+    - name: normalize_local_path
+      source: T2
+      signature: 'normalize_local_path(raw: str) -> Path'
+      digest: 98909bb744600159a60a6f2ac3d2abefc575825fb5efc064883291164b1c3712
+    - &id007
+      name: parse_subtitle_text
+      source: T2
+      signature: 'parse_subtitle_text(content: str) -> str'
+      digest: 3ceb78abd5247b0988911bdec9a5d5cb08a52f936749cee572a0e160be5cbe98
+    - &id006
+      name: is_text_subtitle_codec
+      source: T2
+      signature: 'is_text_subtitle_codec(codec: str) -> bool'
+      digest: dcd3e3fd0328ea5342de14e3e30939a0fd33fd8733f5aa52b14e2bbe5988a85b
+    - name: probe_streams
+      source: T2
+      signature: 'async probe_streams(path: str, debug: Logger) -> StreamProbe'
+      digest: b555ad6cea9b9f935acb4bbdda91a4860a7145061a727f16e50a2bd5b33993c5
+    - &id014
+      name: prepare
+      source: T2
+      signature: 'async prepare(raw: str, allowed_roots: tuple[Path, ...], debug: Logger) -> LocalTarget | None'
+      digest: 5979f2709c3ea73d26e11da17d24722d0d18c3735e4ed141ece058cb98291fb7
+    - &id012
+      name: _run_bounded
+      source: T2
+      signature: 'async _run_bounded(argv: list[str], timeout: float) -> tuple[int, str, str]'
+      digest: cb4a73234e5b5a1c9b5c469128bd904fbd2bdea56f2a249228abccb527e9b2a6
+    - &id010
+      name: _discover_sidecars
+      source: T2
+      signature: '_discover_sidecars(path: Path, allowed_roots: tuple[Path, ...], debug: Logger) -> tuple[SidecarCandidate, ...]'
+      digest: c120ab506a13881a7ae517c580aee7cff1cd132ebcf5574f66a3b689563be519
+    - name: _sidecar_fingerprint
+      source: T2
+      signature: '_sidecar_fingerprint(candidates: tuple[SidecarCandidate, ...]) -> str'
+      digest: 99f8b699d52dd3421dc94c39c9f839480f4a310fbc3270f73adee2a844d46581
+    - &id011
+      name: _first_usable_sidecar
+      source: T2
+      signature: '_first_usable_sidecar(candidates: tuple[SidecarCandidate, ...], debug: Logger) -> tuple[SidecarCandidate, str] | None'
+      digest: 5a201416c87fa10eb36cb4c1b27e4a18521ec3ba9ac3552ff3c4568b4c7c8796
+    - &id008
+      name: _language_rank
+      source: T2
+      signature: '_language_rank(language: str | None) -> int'
+      digest: a2642a3272b9e418801a80a8fd47b93ec31e0a59e0bfd4db1208538eaf9d9f7c
+    - &id009
+      name: _is_english_like
+      source: T2
+      signature: '_is_english_like(lang: str) -> bool'
+      digest: a7b0b0ec03882903f9d9d34fbbabc910e5e6c9ef8816b37b837dcd456b2044e5
+  validation:
+  - argv:
+    - /data/home/henry-arch/anaconda3/envs/daily/bin/python
+    - -m
+    - pytest
+    - tests/test_local_file.py
+    - -q
+- id: T3
+  plan_task: 3
+  title: '`local_file.py` subtitle cascade and audio extraction'
+  lane: backend
+  sequence: 3
+  depends_on:
+  - T2
+  implementer_tier: fast
+  ownership:
+  - backend/local_file.py
+  - tests/test_local_file.py
+  exclusive_resources: []
+  interfaces:
+    consumes:
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+    - *id007
+    - *id008
+    - *id009
+    - *id010
+    - *id011
+    - *id012
+    - *id013
+    produces:
+    - &id015
+      name: try_subtitles
+      source: T3
+      signature: 'async try_subtitles(target: LocalTarget, allowed_roots: tuple[Path, ...], debug: Logger) -> tuple[str, str] | None'
+      digest: cdec334f966ae710b9ce25a01933eb4cba14f1fac9029d7771904dffc3202d63
+    - &id016
+      name: extract_audio
+      source: T3
+      signature: 'async extract_audio(target: LocalTarget, tmpdir: str, debug: Logger) -> str'
+      digest: 370e1513ae1c3c97e87ecc30370639f6045fd0847d0bd4b4a95805fb574d3208
+  validation:
+  - argv:
+    - /data/home/henry-arch/anaconda3/envs/daily/bin/python
+    - -m
+    - pytest
+    - tests/test_local_file.py
+    - -q
+- id: T4
+  plan_task: 4
+  title: '`/transcript` local branch and local cache writer'
+  lane: backend
+  sequence: 4
+  depends_on:
+  - T3
+  implementer_tier: standard
+  ownership:
+  - backend/main.py
+  - tests/test_local_file.py
+  exclusive_resources: []
+  interfaces:
+    consumes:
+    - *id014
+    - *id015
+    - *id016
+    - *id007
+    - *id003
+    - *id002
+    - name: _cache_get
+      source: baseline:0e3834c8506a259dc2ec4252ecd8a48496161ae3
+      signature: '_cache_get(video_id: str, ttl_days: int) -> dict | None'
+      digest: bc2703bd221c79e7cf7a33c2d358ea6c0c1110e50eaed74da1cb8de5bc0bbb6a
+    - name: _cache_prune_expired
+      source: baseline:0e3834c8506a259dc2ec4252ecd8a48496161ae3
+      signature: '_cache_prune_expired(ttl_days: int) -> int'
+      digest: 5fd9d89e5a414fde73c7ec80575a61bb1de19eba0d281deab08d0794f5c47580
+    - name: _get_cache_db
+      source: baseline:0e3834c8506a259dc2ec4252ecd8a48496161ae3
+      signature: _get_cache_db() -> sqlite3.Connection
+      digest: 3f7114541489553ba8abf14b3123cdc7ca4abc882b036f51139181c334629abf
+    - name: _transcribe_audio
+      source: baseline:0e3834c8506a259dc2ec4252ecd8a48496161ae3
+      signature: '_transcribe_audio(audio_path: str, config: AppConfig, model: str) -> str'
+      digest: 99b193beeb32a289fa599ac969086d248f6e86d3aab2c5a85d3812c3a9cfd812
+    - name: _parse_subtitle_text
+      source: baseline:0e3834c8506a259dc2ec4252ecd8a48496161ae3
+      signature: '_parse_subtitle_text(path: str) -> str'
+      digest: cfc0b730eb877f5821eeaa2751212384d36c23369f8c8e9d2fc11d4f48a86fd4
+    - name: transcript_endpoint
+      source: baseline:0e3834c8506a259dc2ec4252ecd8a48496161ae3
+      signature: POST /transcript -> dict[str, Any]
+      digest: c68c6579453ca725a9ad2724edd676f370654f85e2587947e36ccea998186320
+    produces:
+    - name: _transcript_local
+      source: T4
+      signature: 'async _transcript_local(url: str, req: TranscriptRequest, config: AppConfig) -> dict[str, Any]'
+      digest: 070243ee2e9fd96d2cc07fd298219e7b2a08eaf12138ee5f78e5155a8e11488d
+    - name: _cache_put_local
+      source: T4
+      signature: '_cache_put_local(video_id: str, text: str, source: str, ttl_days: int, path_hash: str) -> None'
+      digest: 8fbc58ab55a42dcaf3ae261f5ae234f09f957101f0dda49bdf56215fa7850db4
+  validation:
+  - argv:
+    - /data/home/henry-arch/anaconda3/envs/daily/bin/python
+    - -m
+    - pytest
+    - tests/
+    - -q
+- id: T5
+  plan_task: 5
+  title: Popup source chip, local-path restore, and empty-input message
+  lane: extension
+  sequence: 1
+  depends_on: []
+  implementer_tier: standard
+  ownership:
+  - extension/popup.js
+  - extension/popup.html
+  - tests/popup.test.js
+  exclusive_resources: []
+  interfaces:
+    consumes: []
+    produces:
+    - name: classifyInput
+      source: T5
+      signature: 'classifyInput(raw: string) -> { kind: ''local'' | ''web'', label: string, title: string } | null'
+      digest: 89a3a2ba7ff6454dbb9434e87d9ba4117beb4a29ca21dd019e89e8ddf28d1f5e
+    - name: sourceKey
+      source: T5
+      signature: 'sourceKey(raw: string) -> string'
+      digest: 5978635f0030571a441625445938407bb3b25ae0bced34dac6be1b8d0daf6efd
+    - name: renderSourceChip
+      source: T5
+      signature: 'renderSourceChip(): void'
+      digest: 5b20846e419b5a2eaa03d6a66b0f1d982cac520d3da239d44b5eb10cd8a4dc41
+  validation:
+  - argv:
+    - node
+    - --test
+    - tests/popup.test.js
+- id: T6
+  plan_task: 6
+  title: 120-minute transcript timeout and manifest version
+  lane: extension
+  sequence: 2
+  depends_on:
+  - T5
+  implementer_tier: fast
+  ownership:
+  - extension/background.js
+  - extension/manifest.json
+  - tests/background.test.js
+  exclusive_resources: []
+  interfaces:
+    consumes:
+    - name: TRANSCRIPT_TIMEOUT_MS
+      source: baseline:0e3834c8506a259dc2ec4252ecd8a48496161ae3
+      signature: 'TRANSCRIPT_TIMEOUT_MS: number'
+      digest: 539cc510add76148e4961ed4171eeb441fb3c5650d321ae791b8c3b6b3c57844
+    - name: handleStart_abort
+      source: baseline:0e3834c8506a259dc2ec4252ecd8a48496161ae3
+      signature: 'handleStart(msg): Promise<{ ok: boolean, error?: string }>'
+      digest: fcbda53c5a093e02b9e6ef50910daf2fea5922ad144c2633c9211d3ebf4c9441
+    produces:
+    - name: formatTimeoutMessage
+      source: T6
+      signature: 'formatTimeoutMessage(ms: number) -> string'
+      digest: 4b6939338d10962d4a7fa846a76dd7b5724fba5f30aa633f4665a7285ebae7fb
+    - name: TRANSCRIPT_TIMEOUT_MS
+      source: T6
+      signature: 'TRANSCRIPT_TIMEOUT_MS: 7200000'
+      digest: 2f4a5bb03e14b13b12fe60dfe5cd7bda59b0666f325047b3ad9c2ccd512beb37
+  validation:
+  - argv:
+    - node
+    - --test
+    - tests/background.test.js
+- id: T7
+  plan_task: 7
+  title: AGENTS.md and README.md local-file documentation
+  lane: docs
+  sequence: 1
+  depends_on: []
+  implementer_tier: economy
+  ownership:
+  - AGENTS.md
+  - README.md
+  exclusive_resources: []
+  interfaces:
+    consumes: []
+    produces: []
+  validation:
+  - argv:
+    - grep
+    - -n
+    - local_files
+    - AGENTS.md
+- id: T8
+  plan_task: 8
+  title: ARCHITECTURE.md local-file section and init-flow deltas
+  lane: docs
+  sequence: 2
+  depends_on:
+  - T7
+  implementer_tier: fast
+  ownership:
+  - ARCHITECTURE.md
+  exclusive_resources: []
+  interfaces:
+    consumes: []
+    produces: []
+  validation:
+  - argv:
+    - grep
+    - -n
+    - local_file
+    - ARCHITECTURE.md
