@@ -4,7 +4,11 @@ const DEFAULT_PORT = 8666;
 const DEFAULT_TEXTKIT_PORT = 8765;
 const FILE_BRIDGE_DEFAULT_PORT = 8964;
 const BACKEND_TIMEOUT_MS = 12 * 60 * 1000;
-const TRANSCRIPT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+const TRANSCRIPT_TIMEOUT_MS = 120 * 60 * 1000; // 120 minutes — safe only because the keepalive lane keeps the worker alive
+
+function formatTimeoutMessage(ms) {
+  return `Request timed out after ${Math.round(ms / 60000)} minutes.`;
+}
 const LOCAL_BACKEND_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 // ── Backend URL cache (yt2txt) ──────────────────────────────────
@@ -401,7 +405,7 @@ async function handleStart(msg) {
   } catch (e) {
     if (e.name === 'AbortError') {
       const errorMsg = timedOut
-        ? "Request timed out after 15 minutes."
+        ? formatTimeoutMessage(TRANSCRIPT_TIMEOUT_MS)
         : 'Stopped by user.';
       updateState(tab.id, {
         active: false,

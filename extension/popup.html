@@ -156,6 +156,23 @@
     }
     #url:focus { border-color: #38bdf8; outline: none; }
 
+    .source-chip {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin: -6px 0 10px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #1e293b;
+      color: #94a3b8;
+      font-size: 11px;
+      max-width: 100%;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .source-chip .source-chip-icon { color: #38bdf8; }
+    .source-chip .source-chip-label { overflow: hidden; text-overflow: ellipsis; }
+
     button {
       padding: 6px 14px;
       border: none;
@@ -310,6 +327,9 @@
       #url { border-color: #cbd5e1; background: #ffffff; color: #0f172a; }
       #url:focus { border-color: #0284c7; }
 
+      .source-chip { background: #e2e8f0; color: #64748b; }
+      .source-chip .source-chip-icon { color: #0284c7; }
+
       button.primary { background: #0284c7; color: #fff; }
       button.primary:hover:not(:disabled) { background: #0369a1; }
       button.danger { background: #dc2626; color: #fff; }
@@ -351,7 +371,7 @@
 <body>
   <div class="header">
     <h1>YT2TXT</h1>
-    <span class="version">v1.0.7</span>
+    <span class="version">v1.0.8</span>
     <button id="settings-gear" class="gear-btn" title="Backend Settings">⚙</button>
   </div>
 
@@ -383,6 +403,7 @@
     <div class="url-row">
       <input id="url" type="text" placeholder="Paste video URL or use current page...">
     </div>
+    <div id="source-chip" class="source-chip hidden"><span id="source-chip-icon"></span><span id="source-chip-label"></span></div>
 
     <div id="status-bar" class="status-bar">Ready</div>
 
