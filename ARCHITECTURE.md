@@ -736,7 +736,7 @@ popup.js init()
      - fmtAutoCopy, fmtAutoSave, fmtAutoSavePath (NEW)
   3. Pre-fill URL from current tab (existing) and update the source chip
   4. Refresh transcript state from background (existing)
-  5. Load persisted transcript result (existing; local raw paths match a file:// tab URL via sourceKey equivalence)
+  5. Load persisted transcript result (existing; absolute local raw paths match a file:// tab URL via sourceKey equivalence; `~` paths are a documented gap and are not restored)
   6. Load translation tab state:
      - tl2Language (sync, global) → set language selector
      - translate:result:{tabId} → fill textarea, enable buttons
