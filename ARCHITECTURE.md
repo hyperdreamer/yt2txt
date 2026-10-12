@@ -227,6 +227,40 @@ offscreen.js:
 - `extension/offscreen.html` — minimal HTML loading offscreen.js
 - `extension/offscreen.js` — clipboard handler (exact copy from TextKit)
 
+### 2.6 Local file transcript (backend)
+
+`POST /transcript` accepts a local video as a `file://` URL, an absolute path, or a `~/` path. The
+backend classifies the input first:
+
+```
+raw → strip
+ ├─ starts with "//"                          → WEB  (yt-dlp handles scheme-relative URLs today)
+ ├─ URL scheme is "file" (case-insensitive)   → LOCAL
+ ├─ starts with "/"                           → LOCAL
+ ├─ starts with "~"                           → LOCAL
+ └─ anything else                             → WEB  (existing yt-dlp pipeline, unchanged)
+```
+
+For LOCAL inputs `backend/local_file.py`:
+
+1. normalises the path (percent-decoding and netloc checks for `file:`-scheme inputs only; raw paths
+   are verbatim), expands `~`, resolves symlinks, checks the `local_files.allowed_roots` allowlist,
+   existence, regular-file, and readability;
+2. runs one 30 s-bounded `ffprobe -show_entries stream=index,codec_type,codec_name:stream_tags=language
+   -of json` to learn audio presence and the ordered subtitle candidates; a failed probe means
+   "streams unknown" and never fails the request;
+3. tries sidecar subtitles (`<stem>.srt`/`.vtt`, then `<stem>.<lang>.srt|vtt` with English-likes
+   first), then embedded text subtitle streams (extracted with
+   `ffmpeg -nostdin -v error -i <video> -map 0:<global ffprobe index> -f srt -`, 120 s bound);
+4. otherwise extracts audio with `ffmpeg -nostdin -v error -y -i <video> -vn -sn -dn -map 0:a:0
+   -b:a 64k -ac 1 <tmpdir>/<stem>.mp3` and calls the existing `_transcribe_audio` unchanged.
+
+Local results are cached under `local:<path_hash>:<content_hash>`, where the content hash covers the
+video size, the video mtime, and a fingerprint of every discovered sidecar candidate — so editing a
+sidecar or re-exporting the video forces a cache miss, and `_cache_put_local` deletes stale rows for
+the same path in the same transaction as the insert. The response contract, cache table, and TextKit
+/ File Bridge boundaries are unchanged.
+
 ---
 
 ## 3. State Management
@@ -700,9 +734,9 @@ popup.js init()
      - textkitHost, textkitPort (NEW)
      - tl2AutoCopy, tl2AutoSave, tl2AutoSavePath, yt2txtAutoTranslate (NEW)
      - fmtAutoCopy, fmtAutoSave, fmtAutoSavePath (NEW)
-  3. Pre-fill URL from current tab (existing)
+  3. Pre-fill URL from current tab (existing) and update the source chip
   4. Refresh transcript state from background (existing)
-  5. Load persisted transcript result (existing)
+  5. Load persisted transcript result (existing; absolute local raw paths match a file:// tab URL via sourceKey equivalence; `~` paths are a documented gap and are not restored)
   6. Load translation tab state:
      - tl2Language (sync, global) → set language selector
      - translate:result:{tabId} → fill textarea, enable buttons

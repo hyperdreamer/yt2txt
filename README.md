@@ -22,7 +22,7 @@ YT2TXT uses **three backends**:
 
 - Python 3.10+
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`pip install yt-dlp`)
-- ffmpeg (for audio splitting on long videos)
+- ffmpeg (for audio splitting on long videos and local-file audio extraction)
 - Chrome or Chromium browser
 - OpenAI-compatible API key (for transcription; free if video has subtitles)
 - [TextKit](https://github.com/hyperdreamer/textkit) backend (for Format and Translation tabs)
@@ -62,6 +62,11 @@ ai:
 cache:
   enabled: true
   ttl_days: 30
+
+# Optional: restrict which local paths the backend may read.
+# Empty (the default) means unrestricted.
+local_files:
+  allowed_roots: []
 ```
 
 Or export the environment variable:
@@ -99,6 +104,19 @@ cd backend && python main.py
 3. Optionally check **Force refresh** to bypass cache
 4. Click **Get Transcript**
 5. Copy or download the result
+
+### Local video files
+
+1. Open the video file in Chrome (a `file:///…` tab) or leave the tab anywhere
+2. Click the YT2TXT icon — a `file://` tab URL is pre-filled automatically; otherwise paste the
+   absolute path (or `~`-path) of the video
+3. The source chip under the URL box confirms the input was recognised (`Local file · <name>`)
+4. Click **Get Transcript** — sidecar/embedded subtitles are used when present, otherwise the audio
+   is extracted with ffmpeg and transcribed
+
+No Chrome file-access toggle is required: the extension only forwards the path string, and the
+backend (which runs as your user) is the only component that reads the file. Set
+`local_files.allowed_roots` in `backend/config.yaml` to restrict which paths the backend may read.
 
 ### Format tab
 
@@ -165,6 +183,7 @@ extension/            ← Chrome MV3 extension
 
 backend/              ← FastAPI backend
   main.py             ← FastAPI app with /transcript and /health
+  local_file.py       ← local-file pipeline (classification, subtitles, ffmpeg)
   config.yaml         ← live config (gitignored)
   config.example.yaml ← committed template
   transcript_cache.db ← SQLite cache (gitignored)
