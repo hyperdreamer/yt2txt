@@ -35,15 +35,31 @@ function createPopupHarness(options = {}) {
 
   const fetchCalls = [];
   const runtimeMessages = [];
+  const localData = { ...(options.localData || {}) };
 
   // ---- minimal DOM elements -------------------------------------------
+  function classListStub() {
+    const classes = new Set();
+    return {
+      add: (c) => { classes.add(c); },
+      remove: (c) => { classes.delete(c); },
+      toggle: (c, force) => {
+        const on = force === undefined ? !classes.has(c) : force;
+        if (on) classes.add(c); else classes.delete(c);
+        return on;
+      },
+      contains: (c) => classes.has(c),
+    };
+  }
+
   function el(id, overrides = {}) {
     const defaults = {
       value: '',
       disabled: false,
       checked: false,
       textContent: '',
-      classList: { add() {}, remove() {}, toggle() {}, contains() {} },
+      title: '',
+      classList: classListStub(),
       addEventListener() {},
       replaceChildren() {},
     };
@@ -88,6 +104,9 @@ function createPopupHarness(options = {}) {
     host: el('host'),
     port: el('port'),
     force: el('force'),
+    'source-chip': el('source-chip'),
+    'source-chip-icon': el('source-chip-icon'),
+    'source-chip-label': el('source-chip-label'),
     'tl2-language': el('tl2-language'),
     'tl2-status-bar': el('tl2-status-bar'),
     'tl2-result': el('tl2-result'),
@@ -137,7 +156,18 @@ function createPopupHarness(options = {}) {
       local: {
         get(keys) {
           let result = {};
-          if (typeof keys === 'object' && !Array.isArray(keys)) result = { ...keys };
+          if (typeof keys === 'string') {
+            result[keys] = localData[keys];
+          } else if (Array.isArray(keys)) {
+            for (const key of keys) result[key] = localData[key];
+          } else if (keys && typeof keys === 'object') {
+            result = { ...keys };
+            for (const key of Object.keys(keys)) {
+              if (Object.hasOwn(localData, key)) result[key] = localData[key];
+            }
+          } else {
+            result = { ...localData };
+          }
           return Promise.resolve(result);
         },
         set() { return Promise.resolve(); },
@@ -145,7 +175,7 @@ function createPopupHarness(options = {}) {
       },
     },
     tabs: {
-      query: async () => [{ id: 1, url: 'https://youtube.com/watch?v=test' }],
+      query: async () => [{ id: 1, url: options.tabUrl || 'https://youtube.com/watch?v=test' }],
     },
     runtime: {
       onMessage: { addListener() {} },
@@ -498,4 +528,114 @@ test('doTranslation sends translate:start with only type, tabId, text, language'
   assert.equal(Object.keys(msg).includes('sourceUrl'), false, 'must not include sourceUrl');
   assert.equal(Object.keys(msg).includes('host'), false, 'must not include host');
   assert.equal(Object.keys(msg).includes('port'), false, 'must not include port');
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Source chip + sourceKey + init restore (local file transcription)
+// ═══════════════════════════════════════════════════════════════════
+
+test('source chip labels a percent-encoded local file', () => {
+  const harness = createPopupHarness();
+  const info = harness.context.classifyInput('file:///a/b/My%20Video.mp4');
+  assert.equal(info.kind, 'local');
+  assert.equal(info.label, 'Local file · My Video.mp4');
+  assert.equal(info.title, '/a/b/My Video.mp4');
+});
+
+test('source chip treats FILE:// and file:/ schemes as local', () => {
+  const harness = createPopupHarness();
+  assert.equal(harness.context.classifyInput('FILE:///a/b.mp4').kind, 'local');
+  assert.equal(harness.context.classifyInput('file:/a/b.mp4').kind, 'local');
+});
+
+test('source chip labels an https URL with its hostname', () => {
+  const harness = createPopupHarness();
+  const info = harness.context.classifyInput('https://youtube.com/x');
+  assert.equal(info.kind, 'web');
+  assert.equal(info.label, 'Web URL · youtube.com');
+});
+
+test('source chip is hidden for empty, relative, scheme-relative, and unknown schemes', () => {
+  const harness = createPopupHarness();
+  for (const input of ['', 'Downloads/x.mp4', '//host/x', 'rtmp://x']) {
+    assert.equal(harness.context.classifyInput(input), null, `expected hidden for ${input}`);
+  }
+});
+
+test('sourceKey equates a file URL with the equivalent raw path', () => {
+  const harness = createPopupHarness();
+  assert.equal(
+    harness.context.sourceKey('file:///a/My%20Video.mp4'),
+    harness.context.sourceKey('/a/My Video.mp4'),
+  );
+  assert.equal(
+    harness.context.sourceKey('file:///a/My%3FVideo.mp4'),
+    harness.context.sourceKey('/a/My?Video.mp4'),
+  );
+  assert.equal(
+    harness.context.sourceKey('file:///a/My%23Video.mp4'),
+    harness.context.sourceKey('/a/My#Video.mp4'),
+  );
+  assert.equal(harness.context.sourceKey('file:///a/50%off.mp4'), 'file:///a/50%off.mp4');
+});
+
+test('init() renders the chip for a prefilled file:// tab', async () => {
+  const harness = createPopupHarness({ tabUrl: 'file:///a/b/My%20Video.mp4' });
+  await harness.context.init();
+  assert.equal(harness.elements['source-chip'].classList.contains('hidden'), false);
+  assert.equal(harness.elements['source-chip-icon'].textContent, '📁');
+  assert.equal(harness.elements['source-chip-label'].textContent, 'Local file · My Video.mp4');
+  assert.equal(harness.elements['source-chip'].title, '/a/b/My Video.mp4');
+});
+
+test('init() hides the chip for a relative path', async () => {
+  const harness = createPopupHarness();
+  harness.elements['url'].value = 'Downloads/x.mp4';
+  harness.context.updateSourceChip();
+  assert.equal(harness.elements['source-chip'].classList.contains('hidden'), true);
+});
+
+test('init() restores a legacy string entry', async () => {
+  const harness = createPopupHarness({
+    localData: { 'transcript:1': 'LEGACY' },
+  });
+  await harness.context.init();
+  assert.equal(harness.elements['result'].value, 'LEGACY');
+});
+
+test('init() restores an object entry matching tab.url', async () => {
+  const harness = createPopupHarness({
+    tabUrl: 'https://youtube.com/watch?v=test',
+    localData: { 'transcript:1': { text: 'MATCHED', url: 'https://youtube.com/watch?v=test' } },
+  });
+  await harness.context.init();
+  assert.equal(harness.elements['result'].value, 'MATCHED');
+});
+
+test('init() restores a raw local path entry on the equivalent file:// tab', async () => {
+  const harness = createPopupHarness({
+    tabUrl: 'file:///a/My%20Video.mp4',
+    localData: { 'transcript:1': { text: 'LOCAL TEXT', url: '/a/My Video.mp4' } },
+  });
+  await harness.context.init();
+  assert.equal(harness.elements['result'].value, 'LOCAL TEXT');
+});
+
+test('init() leaves the textarea empty for a mismatching URL', async () => {
+  const harness = createPopupHarness({
+    tabUrl: 'https://youtube.com/watch?v=test',
+    localData: { 'transcript:1': { text: 'OTHER', url: 'https://youtube.com/other' } },
+  });
+  await harness.context.init();
+  assert.equal(harness.elements['result'].value, '');
+});
+
+test('startCapture shows the URL-or-local-path message for empty input', async () => {
+  const harness = createPopupHarness();
+  harness.elements['url'].value = '';
+  await harness.context.startCapture();
+  assert.equal(
+    harness.elements['status-bar'].textContent,
+    'Enter a video URL or a local video path (for example the file:// URL of a video open in this tab).',
+  );
 });

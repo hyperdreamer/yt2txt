@@ -40,6 +40,9 @@ const fmtPathSuggestions = document.getElementById('fmt-path-suggestions');
 const hostInput = document.getElementById('host');
 const portInput = document.getElementById('port');
 const forceCheckbox = document.getElementById('force');
+const sourceChip = document.getElementById('source-chip');
+const sourceChipIcon = document.getElementById('source-chip-icon');
+const sourceChipLabel = document.getElementById('source-chip-label');
 
 // ── Translation panel elements ────────────────────────────────
 const tl2Language = document.getElementById('tl2-language');
@@ -85,6 +88,66 @@ function validateFileBridgeSettings(host, port) {
     return { valid: false, error: 'File Bridge port must be between 1 and 65535.' };
   }
   return { valid: true, host: normalized === '::1' ? '[::1]' : normalized, port };
+}
+
+// ── Input source chip (local vs web) ───────────────────────────
+// Display-only mirror of the backend's classification rules.  A mismatch
+// can only mislabel the chip; the backend stays authoritative.
+function inputBasename(p) {
+  const parts = String(p).split('/');
+  return parts[parts.length - 1] || p;
+}
+
+function fileUrlDisplayPath(raw) {
+  try {
+    return decodeURIComponent(new URL(raw).pathname);
+  } catch {
+    return raw;
+  }
+}
+
+function classifyInput(raw) {
+  const s = (raw || '').trim();
+  if (!s) return null;
+  if (s.startsWith('//')) return null;
+  if (/^file:/i.test(s)) {
+    const full = fileUrlDisplayPath(s);
+    return { kind: 'local', label: `Local file · ${inputBasename(full)}`, title: full };
+  }
+  if (s.startsWith('/')) {
+    return { kind: 'local', label: `Local file · ${inputBasename(s)}`, title: s };
+  }
+  if (s.startsWith('~')) {
+    return { kind: 'local', label: `Local file · ${inputBasename(s)}`, title: s };
+  }
+  if (/^https?:\/\//i.test(s)) {
+    try {
+      return { kind: 'web', label: `Web URL · ${new URL(s).hostname}`, title: s };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function sourceKey(raw) {
+  const s = String(raw ?? '');
+  if (/^file:/i.test(s)) {
+    try {
+      return decodeURIComponent(new URL(s).pathname);
+    } catch {
+      return s;
+    }
+  }
+  return s;
+}
+
+function updateSourceChip() {
+  const info = classifyInput(urlInput.value);
+  sourceChip.classList.toggle('hidden', !info);
+  sourceChipIcon.textContent = info ? (info.kind === 'local' ? '📁' : '🌐') : '';
+  sourceChipLabel.textContent = info ? info.label : '';
+  sourceChip.title = info ? info.title : '';
 }
 
 // ── State ──────────────────────────────────────────────────────
@@ -135,6 +198,7 @@ fmtAutosavePath.addEventListener('input', () => {
   saveFmtSettings();
   updateFmtPathSuggestions(fmtAutosavePath.value);
 });
+urlInput.addEventListener('input', updateSourceChip);
 hostInput.addEventListener('change', saveYt2txtSettings);
 portInput.addEventListener('change', saveYt2txtSettings);
 resultEl.addEventListener('input', () => {
@@ -262,6 +326,7 @@ async function init() {
   if (tab?.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('about:')) {
     urlInput.value = tab.url;
   }
+  updateSourceChip();
 
   // Refresh state from background
   await refreshState();
@@ -272,7 +337,11 @@ async function init() {
     const stored = await chrome.storage.local.get(resultKey);
     const entry = stored[resultKey];
     if (entry) {
-      if (typeof entry === 'object' && entry.url === tab?.url) {
+      if (
+        typeof entry === 'object' &&
+        (entry.url === tab?.url ||
+          sourceKey(entry.url) === sourceKey(tab?.url ?? ''))
+      ) {
         resultEl.value = entry.text || '';
       } else if (typeof entry === 'string') {
         // Legacy format (pre-URL-keyed)
@@ -492,7 +561,8 @@ async function refreshState() {
 async function startCapture() {
   const url = urlInput.value.trim();
   if (!url) {
-    statusBar.textContent = 'Enter a video URL first.';
+    statusBar.textContent =
+      'Enter a video URL or a local video path (for example the file:// URL of a video open in this tab).';
     statusBar.className = 'status-bar error';
     return;
   }
