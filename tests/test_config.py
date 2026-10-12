@@ -18,7 +18,9 @@ from main import (  # noqa: E402
     DEFAULT_TIMEOUT_WRITE,
     TIMEOUT_RANGES,
     AppConfig,
+    LocalFilesConfig,
     TimeoutConfig,
+    _parse_local_files_config,
     _parse_timeout_config,
 )
 
@@ -282,3 +284,70 @@ class TestTimeoutWiring:
         assert captured["httpx_timeout"].write == 30
         assert captured["httpx_timeout"].pool == 8
         assert captured["outer_deadline"] == 360
+
+
+# ── local_files config ──────────────────────────────────────────
+
+class TestLocalFilesConfig:
+    """The local_files.allowed_roots block is validated like ai.timeout."""
+
+    def test_absent_section_defaults_to_unrestricted(self):
+        assert AppConfig().local_files == LocalFilesConfig()
+        assert AppConfig().local_files.allowed_roots == ()
+        assert _parse_local_files_config(None).allowed_roots == ()
+
+    def test_empty_list(self):
+        assert _parse_local_files_config({"allowed_roots": []}).allowed_roots == ()
+
+    def test_list_is_expanded_and_resolved(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / "videos").mkdir()
+        cfg = _parse_local_files_config({"allowed_roots": ["~/videos"]})
+        assert cfg.allowed_roots == ((tmp_path / "videos").resolve(),)
+
+    def test_resolved_absolute_paths(self, tmp_path):
+        cfg = _parse_local_files_config({"allowed_roots": [str(tmp_path)]})
+        assert cfg.allowed_roots == (tmp_path.resolve(),)
+
+    def test_non_mapping_raises(self):
+        with pytest.raises(RuntimeError, match="local_files must be a mapping"):
+            _parse_local_files_config(["x"])
+
+    def test_unknown_key_raises(self):
+        with pytest.raises(RuntimeError, match="Unknown local_files setting.*roots"):
+            _parse_local_files_config({"roots": []})
+
+    def test_scalar_value_raises(self):
+        with pytest.raises(RuntimeError, match="local_files.allowed_roots must be a list"):
+            _parse_local_files_config({"allowed_roots": "/videos"})
+
+    def test_non_string_entry_raises(self):
+        with pytest.raises(RuntimeError, match="non-empty strings"):
+            _parse_local_files_config({"allowed_roots": [123]})
+
+    def test_empty_string_entry_raises(self):
+        with pytest.raises(RuntimeError, match="non-empty strings"):
+            _parse_local_files_config({"allowed_roots": ["  "]})
+
+    def test_relative_entry_raises(self):
+        with pytest.raises(RuntimeError, match="must be absolute after expansion"):
+            _parse_local_files_config({"allowed_roots": ["relative/dir"]})
+
+    def test_nonexistent_root_accepted(self, tmp_path):
+        missing = tmp_path / "offline-mount"
+        cfg = _parse_local_files_config({"allowed_roots": [str(missing)]})
+        assert cfg.allowed_roots == (missing.resolve(),)
+
+    def test_frozen(self):
+        cfg = LocalFilesConfig()
+        with pytest.raises(Exception):
+            cfg.allowed_roots = ()  # type: ignore[misc]
+
+    def test_load_config_wires_local_files(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            backend_main,
+            "_load_yaml_config",
+            lambda: {"local_files": {"allowed_roots": [str(tmp_path)]}},
+        )
+        cfg = backend_main.load_config()
+        assert cfg.local_files.allowed_roots == (tmp_path.resolve(),)

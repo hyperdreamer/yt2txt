@@ -34,5 +34,13 @@ cache:
   enabled: true
   ttl_days: 30
 
+# Local file transcription. When allowed_roots is non-empty, the backend
+# refuses to read any local video or sidecar subtitle outside these paths.
+# Entries must be absolute (or start with ~) and are expanded and resolved
+# at config load. Empty means unrestricted — suitable for a single-user
+# machine, not for a shared one.
+local_files:
+  allowed_roots: []
+
 # Enable debug logging to stderr.
 # debug: false
