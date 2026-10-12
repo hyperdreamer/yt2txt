@@ -2903,8 +2903,12 @@ Expected: PASS — **69 passed** (30 in `tests/popup.test.js` + 34 in `tests/fil
 Run: `node --test tests/background.test.js`
 Expected: 5 passed.
 
+Run: `grep -c 'after [0-9][0-9]* minutes' extension/background.js`
+Expected: `0` — no literal duration remains in the abort message.
+
 Run: `grep -c minutes extension/background.js`
-Expected: `1` — only the `// 120 minutes — ...` rationale comment remains; the abort message is built from the constant.
+Expected: `2` — the `// 120 minutes — ...` rationale comment and the `minutes.`
+template inside `formatTimeoutMessage`. Any other count means a literal duration survived.
 
 ```bash
 git add extension/background.js extension/manifest.json tests/background.test.js
@@ -3136,8 +3140,9 @@ Expected: one `local_file.py` tree line in each file.
 Run: `grep -n allowed_roots AGENTS.md README.md`
 Expected: a `local_files:` block with `allowed_roots: []` in each file, plus the AGENTS.md bullet.
 
-Run: `grep -c Local README.md`
-Expected: `1` — the new "Local video files" subsection heading.
+Run: `grep -c '^### Local video files' README.md`
+Expected: `1` — the new subsection heading. (A bare `grep -c Local README.md` counts 2,
+because the prescribed chip example line also contains the word `Local`.)
 
 ```bash
 git add AGENTS.md README.md

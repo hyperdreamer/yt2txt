@@ -3,7 +3,7 @@ generated_at: '2026-10-12T01:09:41Z'
 run_id: pm-run-20261011-114932-0005f5e8
 source_plan:
   path: docs/superpowers/plans/2026-10-11-local-video-file-transcription.md
-  sha256: 13f1aae546673774f9c8927d7fa002e77620dfab806024461e9beda59cc4bc90
+  sha256: 0e0be47e33141422d8ef600f283219e4898cc0116830500885c94562ac6b082b
   commit_oid: 34692a3e399321710ebbfdf5013a76a0e46b7923
   task_numbers:
   - 1
@@ -14,6 +14,7 @@ source_plan:
   - 6
   - 7
   - 8
+  amendment: 'verification-step expectations corrected for tasks 6 and 7 (plan review defect: grep -c counts)'
 lanes:
 - id: backend
   task_ids:
