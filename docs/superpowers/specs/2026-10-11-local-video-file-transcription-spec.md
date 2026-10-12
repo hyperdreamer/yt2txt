@@ -3406,8 +3406,15 @@ Old:
 New:
 
 ```
-  5. Load persisted transcript result (existing; local raw paths match a file:// tab URL via sourceKey equivalence)
+  5. Load persisted transcript result (existing; absolute local raw paths match a file:// tab URL via sourceKey equivalence)
 ```
+
+> **Errata (post-implementation, lane-review finding F-1).** The delta above originally read "local raw
+> paths"; the delivered text reads "**absolute** local raw paths" because §9.4 and §4.4 establish that
+> `~` paths are compared verbatim and therefore cannot `sourceKey`-equal a decoded `file://` pathname —
+> the documented low-impact gap. Only this documentation-precision wording changed: no normative
+> requirement, contract, or code behaviour is affected. The executed plan text retains the original
+> wording; the divergence is recorded here and in the PM run ledger.
 
 ### D3 — `README.md`
 
