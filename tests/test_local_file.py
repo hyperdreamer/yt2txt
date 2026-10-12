@@ -490,6 +490,75 @@ class TestCacheKey:
         assert second.mtime_ns == first.mtime_ns
         assert second.cache_key != first.cache_key
 
+    def test_cache_put_local_deletes_stale_same_path_rows(self, video, tmp_path, monkeypatch):
+        db = tmp_path / "cache.db"
+        monkeypatch.setattr(backend_main, "CACHE_DB_PATH", db)
+        target = run(local_file.prepare(str(video), (), DBG))
+        path_hash = target.cache_key.split(":")[1]
+        other_path_row = "local:ffffffffffffffff:beef"
+        web_row = "dQw4w9WgXcQ"
+        conn = backend_main._get_cache_db()
+        conn.execute(
+            "INSERT INTO transcript_cache (video_id, text, source) VALUES (?, ?, ?)",
+            (f"local:{path_hash}:stale", "STALE", "subtitles"),
+        )
+        conn.execute(
+            "INSERT INTO transcript_cache (video_id, text, source) VALUES (?, ?, ?)",
+            (other_path_row, "OTHER", "transcription"),
+        )
+        conn.execute(
+            "INSERT INTO transcript_cache (video_id, text, source) VALUES (?, ?, ?)",
+            (web_row, "WEB", "yt-dlp"),
+        )
+        conn.commit()
+        conn.close()
+        backend_main._cache_put_local(
+            target.cache_key, "FRESH", "transcription", 30, path_hash
+        )
+        conn = backend_main._get_cache_db()
+        rows = conn.execute(
+            "SELECT video_id FROM transcript_cache ORDER BY video_id"
+        ).fetchall()
+        conn.close()
+        assert [row[0] for row in rows] == sorted(
+            [target.cache_key, other_path_row, web_row]
+        )
+
+    def test_cache_put_local_one_connection_one_commit(
+        self, video, tmp_path, monkeypatch
+    ):
+        db = tmp_path / "cache.db"
+        monkeypatch.setattr(backend_main, "CACHE_DB_PATH", db)
+        target = run(local_file.prepare(str(video), (), DBG))
+        path_hash = target.cache_key.split(":")[1]
+        real_get_cache_db = backend_main._get_cache_db
+        calls = {"connections": 0, "commits": 0}
+
+        class CountingConnection:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, *args, **kwargs):
+                return self._conn.execute(*args, **kwargs)
+
+            def commit(self):
+                calls["commits"] += 1
+                return self._conn.commit()
+
+            def close(self):
+                return self._conn.close()
+
+        def counting_get_cache_db():
+            calls["connections"] += 1
+            return CountingConnection(real_get_cache_db())
+
+        monkeypatch.setattr(backend_main, "_get_cache_db", counting_get_cache_db)
+        backend_main._cache_put_local(
+            target.cache_key, "FRESH", "transcription", 30, path_hash
+        )
+        assert calls == {"connections": 1, "commits": 1}
+
+
 # ── Sidecar cascade ─────────────────────────────────────────────
 
 
@@ -719,3 +788,123 @@ class TestAudioExtraction:
         assert exc.value.detail.startswith("Failed to extract audio:")
 
 
+# ── Response fields and cache wiring ────────────────────────────
+
+
+class TestResponseFields:
+    @pytest.fixture
+    def config(self):
+        return backend_main.AppConfig(
+            api_key="test-key",
+            cache_enabled=True,
+            cache_ttl_days=30,
+            local_files=backend_main.LocalFilesConfig(),
+        )
+
+    def test_sidecar_response(self, video, config, monkeypatch, tmp_path):
+        monkeypatch.setattr(backend_main, "CACHE_DB_PATH", tmp_path / "cache.db")
+        write_srt(video.with_suffix(".srt"), "Sidecar body")
+        target = run(local_file.prepare(str(video), (), DBG))
+        response = run(
+            backend_main._transcript_local(target, config, "test-model", False)
+        )
+        assert response == {
+            "text": "Sidecar body",
+            "source": "subtitles",
+            "model": "sidecar",
+            "error": None,
+        }
+
+    def test_embedded_response(self, tmp_path, config, monkeypatch):
+        monkeypatch.setattr(backend_main, "CACHE_DB_PATH", tmp_path / "cache.db")
+        srt = tmp_path / "subs.srt"
+        write_srt(srt, "Embedded body")
+        path = tmp_path / "out.mkv"
+        make_mkv_with_subtitle(path, srt)
+        target = run(local_file.prepare(str(path), (), DBG))
+        response = run(
+            backend_main._transcript_local(target, config, "test-model", False)
+        )
+        assert response == {
+            "text": "Embedded body",
+            "source": "subtitles",
+            "model": "ffmpeg",
+            "error": None,
+        }
+
+    def test_transcription_response(self, video, config, monkeypatch, tmp_path):
+        monkeypatch.setattr(backend_main, "CACHE_DB_PATH", tmp_path / "cache.db")
+
+        async def fake_transcribe(audio_path, cfg, model):
+            return "Audio body"
+
+        monkeypatch.setattr(backend_main, "_transcribe_audio", fake_transcribe)
+        target = run(local_file.prepare(str(video), (), DBG))
+        response = run(
+            backend_main._transcript_local(target, config, "test-model", False)
+        )
+        assert response == {
+            "text": "Audio body",
+            "source": "transcription",
+            "model": "test-model",
+            "error": None,
+        }
+
+    def test_cache_hit_response_and_force(self, video, config, monkeypatch, tmp_path):
+        monkeypatch.setattr(backend_main, "CACHE_DB_PATH", tmp_path / "cache.db")
+        write_srt(video.with_suffix(".srt"), "Sidecar body")
+        target = run(local_file.prepare(str(video), (), DBG))
+        run(backend_main._transcript_local(target, config, "test-model", False))
+        cached = run(backend_main._transcript_local(target, config, "test-model", False))
+        assert cached == {
+            "text": "Sidecar body",
+            "source": "subtitles",
+            "model": "cached",
+            "error": None,
+        }
+        # force skips the read and rewrites the row
+        path_hash = target.cache_key.split(":")[1]
+        conn = backend_main._get_cache_db()
+        conn.execute(
+            "UPDATE transcript_cache SET text = 'STALE' WHERE video_id = ?",
+            (target.cache_key,),
+        )
+        conn.commit()
+        conn.close()
+        forced = run(backend_main._transcript_local(target, config, "test-model", True))
+        assert forced["text"] == "Sidecar body" and forced["model"] == "sidecar"
+        conn = backend_main._get_cache_db()
+        row = conn.execute(
+            "SELECT text FROM transcript_cache WHERE video_id = ?",
+            (target.cache_key,),
+        ).fetchone()
+        conn.close()
+        assert row == ("Sidecar body",)
+
+    def test_web_regression_never_enters_local_branch(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(backend_main, "CACHE_DB_PATH", tmp_path / "cache.db")
+        calls = {"extract_video_id": 0}
+
+        async def fake_extract_video_id(url):
+            calls["extract_video_id"] += 1
+            return "webtestid"
+
+        async def fake_subs_manual(url, tmpdir):
+            path = Path(tmpdir) / "web.srt"
+            path.write_text("1\n00:00:00,000 --> 00:00:01,000\nWEB\n")
+            return str(path)
+
+        async def fake_subs_auto(url, tmpdir):
+            return None
+
+        monkeypatch.setattr(backend_main, "_extract_video_id", fake_extract_video_id)
+        monkeypatch.setattr(backend_main, "_download_subs_manual", fake_subs_manual)
+        monkeypatch.setattr(backend_main, "_download_subs_auto", fake_subs_auto)
+        response = run(
+            backend_main.transcript(
+                backend_main.TranscriptRequest(url="https://example.com/watch?v=1")
+            )
+        )
+        assert response["model"] == "yt-dlp"
+        assert response["text"] == "WEB"
+        assert calls["extract_video_id"] == 1

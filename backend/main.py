@@ -29,6 +29,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
+import local_file
+
 # ── Config ──────────────────────────────────────────────────────
 
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
@@ -228,7 +230,7 @@ def load_config() -> AppConfig:
 
 # ── App setup ───────────────────────────────────────────────────
 
-app = FastAPI(title="YT2TXT", version="1.0.7")
+app = FastAPI(title="YT2TXT", version="1.0.8")
 
 
 # ── Config (cached) ────────────────────────────────────────────────
@@ -369,35 +371,9 @@ async def _run_ytdlp(args: list[str], timeout: float = 180) -> str:
 
 def _parse_subtitle_text(path: str) -> str:
     """Extract plain text from an SRT/VTT file (strip timestamps and indices)."""
-    import re
-
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         content = f.read()
-
-    # Remove WEBVTT header if present
-    content = re.sub(r"^WEBVTT.*?\n\n", "", content, flags=re.S)
-
-    # Remove timestamp lines (SRT: 00:00:01,000 --> 00:00:04,000 / VTT: 00:00:01.000 --> 00:00:04.000)
-    content = re.sub(
-        r"\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}.*?\n",
-        "",
-        content,
-    )
-
-    # Remove sequence numbers (SRT block counters).
-    # NOTE: This will also remove legitimate subtitle lines that consist
-    # solely of a number (e.g. a caption that says "42").  This is an
-    # acceptable trade-off — SRT sequence numbers are far more common than
-    # lone-number captions, and a full context-aware parser would be
-    # significantly more complex.
-    content = re.sub(r"^\d+\s*$", "", content, flags=re.M)
-
-    # Remove <c> / </c> and other inline tags
-    content = re.sub(r"<[^>]+>", "", content)
-
-    # Collapse blank lines
-    lines = [line.strip() for line in content.splitlines() if line.strip()]
-    return "\n".join(lines)
+    return local_file.parse_subtitle_text(content)
 
 
 def _resolve_subs_path(tmpdir: str) -> str | None:
@@ -1064,6 +1040,43 @@ def _cache_put(
         conn.close()
 
 
+def _cache_put_local(
+    video_id: str,
+    text: str,
+    source: str,
+    ttl_days: int,
+    path_hash: str,
+) -> None:
+    """Insert a local-file transcript and drop stale rows for the same path.
+
+    One connection, one commit: ``INSERT OR REPLACE``, the existing TTL
+    prune, and the same-path stale-key ``DELETE`` all run before the single
+    commit, so the write is atomic and re-exports/sidecar edits cannot
+    accumulate rows.
+    """
+    conn = _get_cache_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO transcript_cache "
+            "(video_id, text, source, created_at) "
+            "VALUES (?, ?, ?, datetime('now'))",
+            (video_id, text, source),
+        )
+        conn.execute(
+            "DELETE FROM transcript_cache "
+            "WHERE datetime(created_at, '+' || ? || ' days') < datetime('now')",
+            (ttl_days,),
+        )
+        conn.execute(
+            "DELETE FROM transcript_cache "
+            "WHERE video_id LIKE ? AND video_id <> ?",
+            (f"local:{path_hash}:%", video_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ── Endpoints ───────────────────────────────────────────────────
 
 
@@ -1084,6 +1097,13 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
     model = req.model or config.model
 
     _debug("transcript", f"Processing: {url}")
+
+    # ── Local file branch (additive) ─────────────────────────
+    # prepare() returns None for web URLs, so the existing pipeline below
+    # runs unchanged for everything that is not a local file.
+    target = await local_file.prepare(url, config.local_files.allowed_roots, _debug)
+    if target is not None:
+        return await _transcript_local(target, config, model, req.force)
 
     # ── Cache lookup ─────────────────────────────────────────
     video_id: str | None = None
@@ -1181,6 +1201,72 @@ async def transcript(req: TranscriptRequest) -> dict[str, Any]:
             "model": model,
             "error": None,
         }
+
+
+async def _transcript_local(
+    target: local_file.LocalTarget,
+    config: AppConfig,
+    model: str,
+    force: bool,
+) -> dict[str, Any]:
+    """Local-file transcript: cache → subtitles → audio → cache."""
+    video_id = target.cache_key
+    if config.cache_enabled and not force:
+        cached = _cache_get(video_id, config.cache_ttl_days)
+        if cached:
+            _debug("cache", f"hit video_id={video_id} source={cached['source']}")
+            return {
+                "text": cached["text"],
+                "source": cached["source"],
+                "model": "cached",
+                "error": None,
+            }
+        _debug("cache", f"miss video_id={video_id}")
+    elif force:
+        _debug("cache", f"force refresh video_id={video_id}")
+
+    # ``path_hash`` is the middle segment of ``local:<path_hash>:<content_hash>``.
+    path_hash = target.cache_key.split(":", 2)[1]
+
+    subtitles = await local_file.try_subtitles(
+        target, config.local_files.allowed_roots, _debug
+    )
+    if subtitles is not None:
+        text, subtitle_model = subtitles
+        _debug(
+            "transcript",
+            f"Extracted {len(text)} chars from local subtitles ({subtitle_model})",
+        )
+        if config.cache_enabled:
+            _cache_put_local(
+                video_id, text, "subtitles", config.cache_ttl_days, path_hash
+            )
+            _debug("cache", f"stored video_id={video_id} source=subtitles")
+        return {
+            "text": text,
+            "source": "subtitles",
+            "model": subtitle_model,
+            "error": None,
+        }
+
+    _debug("transcript", "No local subtitles — falling back to transcription")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_path = await local_file.extract_audio(target, tmpdir, _debug)
+        _debug("transcript", f"Transcribing audio: {audio_path} with model {model}")
+        text = await _transcribe_audio(audio_path, config, model)
+
+    if config.cache_enabled:
+        _cache_put_local(
+            video_id, text, "transcription", config.cache_ttl_days, path_hash
+        )
+        _debug("cache", f"stored video_id={video_id} source=transcription")
+
+    return {
+        "text": text,
+        "source": "transcription",
+        "model": model,
+        "error": None,
+    }
 
 
 # ── Startup cleanup ────────────────────────────────────────────
