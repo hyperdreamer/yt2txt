@@ -718,8 +718,8 @@ function updateFormatButtons() {
   const hasResult = formatResult.value.trim().length > 0;
   const isActive = formatBtn.textContent === 'Stop';
   formatBtn.disabled = isActive ? false : !hasSource;
-  formatCopy.disabled = !hasResult;
-  formatSave.disabled = !hasResult;
+  formatCopy.disabled = isActive || !hasResult;
+  formatSave.disabled = isActive || !hasResult;
 }
 
 // ── Translation panel actions ─────────────────────────────────
@@ -882,9 +882,9 @@ function updateTranslationButtons() {
   const isActive = tl2Translate.textContent === 'Stop';
   const canRetry = Boolean(translateRetryDescriptor());
   tl2Translate.disabled = isActive ? false : !(hasSource || canRetry);
-  tl2Copy.disabled = !hasResult;
-  tl2Save.disabled = !hasResult;
-  tl2Download.disabled = !hasResult;
+  tl2Copy.disabled = isActive || !hasResult;
+  tl2Save.disabled = isActive || !hasResult;
+  tl2Download.disabled = isActive || !hasResult;
 }
 
 function updateResultButtons() {
