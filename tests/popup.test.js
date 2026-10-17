@@ -35,6 +35,7 @@ function createPopupHarness(options = {}) {
 
   const fetchCalls = [];
   const runtimeMessages = [];
+  const messageListeners = [];
   const localData = { ...(options.localData || {}) };
 
   // ---- minimal DOM elements -------------------------------------------
@@ -178,7 +179,9 @@ function createPopupHarness(options = {}) {
       query: async () => [{ id: 1, url: options.tabUrl || 'https://youtube.com/watch?v=test' }],
     },
     runtime: {
-      onMessage: { addListener() {} },
+      onMessage: {
+        addListener(listener) { messageListeners.push(listener); },
+      },
       sendMessage(msg) {
         runtimeMessages.push(msg);
         if (msg?.type === 'popup:get-state') {
@@ -218,7 +221,17 @@ function createPopupHarness(options = {}) {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(POPUP_PATH, 'utf8'), context, { filename: POPUP_PATH });
 
-  return { context, elements, fetchCalls, syncValues, runtimeMessages };
+  return {
+    context,
+    elements,
+    fetchCalls,
+    syncValues,
+    runtimeMessages,
+    messageListeners,
+    emit(message) {
+      for (const listener of messageListeners) listener(message, {}, () => {});
+    },
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -644,4 +657,89 @@ test('startCapture shows the URL-or-local-path message for empty input', async (
     harness.elements['status-bar'].textContent,
     'Enter a video URL or a local video path (for example the file:// URL of a video open in this tab).',
   );
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Hydrated ownership IDs
+// ═══════════════════════════════════════════════════════════════════
+
+test('hydrated ownership ids drive the active Stop controls', async () => {
+  const harness = createPopupHarness({
+    state: {
+      active: false,
+      status: 'Idle',
+      progress: 'Formatting...',
+      transcript: 'TRANSCRIPT TEXT',
+      error: '',
+      rootId: 'root-1',
+      stageId: 'stage-1',
+      format: {
+        sourceText: 'TRANSCRIPT TEXT',
+        resultText: '',
+        active: true,
+        status: 'Formatting...',
+        error: '',
+        retry: null,
+      },
+    },
+  });
+  await harness.context.init();
+
+  assert.equal(harness.elements['format-btn'].textContent, 'Stop');
+  assert.equal(harness.elements['format-btn'].disabled, false);
+
+  await harness.context.doFormat();
+
+  const stops = harness.runtimeMessages.filter((m) => m.type === 'format:stop');
+  assert.equal(stops.length, 1);
+  assert.equal(stops[0].tabId, 1);
+  assert.equal(stops[0].rootId, 'root-1');
+  assert.equal(stops[0].stageId, 'stage-1');
+});
+
+test('state:update from another tab is ignored', async () => {
+  const harness = createPopupHarness({
+    state: { transcript: 'CURRENT TAB' },
+  });
+  await harness.context.init();
+  assert.ok(harness.messageListeners.length > 0, 'popup registers a runtime listener');
+
+  harness.emit({
+    type: 'state:update',
+    tabId: 2,
+    state: { transcript: 'OTHER TAB' },
+  });
+  assert.equal(harness.elements['result'].value, 'CURRENT TAB');
+
+  harness.emit({
+    type: 'state:update',
+    tabId: 1,
+    state: { transcript: 'SAME TAB' },
+  });
+  assert.equal(harness.elements['result'].value, 'SAME TAB');
+});
+
+test('hydrated translate retry descriptor relabels the existing action button', async () => {
+  const harness = createPopupHarness({
+    state: {
+      transcript: 'TRANSCRIPT TEXT',
+      rootId: 'root-tl',
+      stageId: 'stage-tl',
+      translate: {
+        sourceText: 'SAVED SOURCE',
+        resultText: '',
+        active: false,
+        status: 'Translation failed.',
+        error: 'Translation failed.',
+        targetLanguage: 'German',
+        retry: { kind: 'record', rootId: 'root-tl', stageId: 'stage-tl' },
+      },
+    },
+  });
+  await harness.context.init();
+
+  assert.equal(harness.elements['tl2-translate'].textContent, 'Retry');
+  assert.equal(harness.elements['tl2-translate'].disabled, false);
+  assert.equal(harness.elements['tl2-language'].value, 'original',
+    'the saved language is not copied into the selector');
 });

@@ -155,6 +155,14 @@ let latestState = null;
 let currentTabId = null;
 let userEditedResult = false;
 let tlUserEdited = false;
+// Monotonic view generation.  Every relevant background event and every
+// local start/stop/retry command advances it.  A worker snapshot captured
+// before an advance is stale: rendering it would resurrect superseded
+// activity or overwrite a newer result, so it is discarded instead.
+let viewGeneration = 0;
+// Tab whose fully hydrated state is currently on screen.  Until a tab has
+// one, a discarded snapshot still needs to be re-requested.
+let renderedTabId = null;
 
 // ── Tab switching ──────────────────────────────────────────────
 tabs.forEach((tab) => {
@@ -233,49 +241,53 @@ fileBridgeHostInput.addEventListener('change', saveFileBridgeSettings);
 fileBridgePortInput.addEventListener('change', saveFileBridgeSettings);
 
 // ── Background messages ───────────────────────────────────────
+// Registered at module scope so no snapshot request can be answered before
+// the listeners exist.
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'state:update') {
     if (message.tabId !== currentTabId) return;
+    viewGeneration += 1;
     renderState(message.state);
     return;
   }
-  if (message?.type === 'translation:update') {
+  if (message?.type === 'translation:update' || message?.type === 'tl2:translating') {
     if (message.tabId !== currentTabId) return;
-    if (message.text) {
-      tl2Result.value = message.text;
-    } else if (message.error) {
-      // Error path: keep any existing result visible
+    // Partial messages are only meaningful for the stage currently on
+    // screen.  A late partial from a superseded root must never repaint.
+    if (!partialOwnershipMatches(message)) return;
+    viewGeneration += 1;
+    if (message.type === 'translation:update') {
+      if (message.text) tl2Result.value = message.text;
+      // Error path keeps any existing result visible.
+      if (latestState?.translate) latestState.translate.active = false;
+      setTl2Progress(message.text ? 'Translation complete.' : (message.error || 'Translation failed.'));
+      applyTranslateButtonState();
+      return;
     }
-    tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = !message.text;
-    tl2Translate.textContent = 'Translate';
-    tl2Translate.classList.remove('danger');
-    setTl2Progress(message.text ? 'Translation complete.' : (message.error || 'Translation failed.'));
-    updateTranslationButtons();
-    return;
-  }
-  if (message?.type === 'tl2:translating') {
-    if (message.tabId !== currentTabId) return;
-    if (message.value) {
-      tl2Translate.textContent = 'Stop';
-      tl2Translate.classList.add('danger');
-      tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
-      setTl2Progress('Translating...');
-    } else {
-      tl2Translate.textContent = 'Translate';
-      tl2Translate.classList.remove('danger');
-      updateTranslationButtons();
-    }
+    if (latestState?.translate) latestState.translate.active = message.value === true;
+    if (message.value) setTl2Progress('Translating...');
+    applyTranslateButtonState();
     return;
   }
 });
+
+function partialOwnershipMatches(message) {
+  const rootId = latestState?.rootId;
+  const stageId = latestState?.stageId;
+  if (typeof message.rootId !== 'string' || typeof message.stageId !== 'string') return false;
+  return message.rootId === rootId && message.stageId === stageId;
+}
 
 // ── Init ───────────────────────────────────────────────────────
 async function init() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const newTabId = tab?.id || null;
   // Reset user-edited flag when switching tabs so the new tab's
-  // transcript populates the textarea instead of being blocked.
+  // transcript populates the textarea instead of being blocked.  A new tab
+  // also invalidates any snapshot still in flight for the previous one.
   if (newTabId !== currentTabId) {
+    viewGeneration += 1;
+    renderedTabId = null;
     userEditedResult = false;
     tlUserEdited = false;
     formatRetryRow.classList.add('hidden');
@@ -492,15 +504,36 @@ function updatePathSuggestions(current) {
 }
 
 // ── State sync ─────────────────────────────────────────────────
+// One reconciled worker snapshot is the only hydration source.  The popup
+// never rebuilds state from its own storage reads.
 async function refreshState() {
-  try {
-    const response = await chrome.runtime.sendMessage({ type: 'popup:get-state' });
-    if (response?.ok) {
-      currentTabId = response.tabId || currentTabId;
-      renderState(response.state);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const generation = viewGeneration;
+    const tabId = currentTabId;
+    let response;
+    try {
+      response = await chrome.runtime.sendMessage({ type: 'popup:get-state' });
+    } catch {
+      // Background may not be ready
+      return;
     }
-  } catch {
-    // Background may not be ready
+    if (generation !== viewGeneration || tabId !== currentTabId) {
+      // A newer background event or local command already owns the view.
+      // Only ask again while this tab has no rendered state at all.
+      if (renderedTabId === currentTabId) return;
+      continue;
+    }
+    if (!response?.ok || !response.state) return;
+    const responseTabId = response.tabId === undefined || response.tabId === null
+      ? tabId
+      : response.tabId;
+    if (tabId !== null && responseTabId !== tabId) {
+      if (renderedTabId === currentTabId) return;
+      continue;
+    }
+    if (responseTabId !== null) currentTabId = responseTabId;
+    renderState(response.state);
+    return;
   }
 }
 
@@ -514,6 +547,7 @@ async function startCapture() {
     return;
   }
 
+  viewGeneration += 1;
   userEditedResult = false;
   formatRetryRow.classList.add('hidden');
   resultEl.value = '';
@@ -550,6 +584,7 @@ async function startCapture() {
 }
 
 async function stopCapture() {
+  viewGeneration += 1;
   stopBtn.disabled = true;
   try {
     await chrome.runtime.sendMessage({
@@ -592,6 +627,7 @@ function downloadText() {
 async function doFormat() {
   if (formatBtn.textContent === 'Stop') {
     // Stop in-progress format
+    viewGeneration += 1;
     formatBtn.disabled = true;
     try {
       await chrome.runtime.sendMessage({
@@ -610,6 +646,7 @@ async function doFormat() {
     return;
   }
 
+  viewGeneration += 1;
   formatBtn.textContent = 'Stop';
   formatBtn.classList.add('danger');
   formatResult.value = '';
@@ -670,6 +707,7 @@ function updateFormatButtons() {
 // ── Translation panel actions ─────────────────────────────────
 async function doTranslation() {
   if (tl2Translate.textContent === 'Stop') {
+    viewGeneration += 1;
     tl2Translate.disabled = true;
     try {
       await chrome.runtime.sendMessage({
@@ -684,6 +722,28 @@ async function doTranslation() {
     return;
   }
 
+  // A durable interrupted record owns its own source text, language, and
+  // Force flag.  The descriptor is the only provenance the popup forwards.
+  const descriptor = translateRetryDescriptor();
+  if (descriptor) {
+    viewGeneration += 1;
+    tl2Translate.disabled = true;
+    setTl2Progress('Retrying translation...');
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'transform:retry',
+        tabId: currentTabId,
+        descriptor,
+      });
+      if (!response?.ok) setTl2Progress(response?.error || 'Retry failed.');
+    } catch (e) {
+      setTl2Progress(e.message || 'Retry failed.');
+    } finally {
+      applyTranslateButtonState();
+    }
+    return;
+  }
+
   const text = resultEl.value.trim();
   if (!text) {
     setTl2Progress('No transcript text to translate.');
@@ -691,6 +751,7 @@ async function doTranslation() {
   }
   const language = tl2Language.value;
 
+  viewGeneration += 1;
   tl2Result.value = '';
   tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
 
@@ -766,11 +827,36 @@ function setTl2Progress(msg) {
   }
 }
 
+function translateRetryDescriptor() {
+  const retry = latestState?.translate?.retry;
+  if (!retry || typeof retry !== 'object' || Array.isArray(retry)) return null;
+  // The worker routes `legacy` descriptors to the format stage, so only a
+  // record descriptor is a valid translation retry.
+  if (retry.kind !== 'record') return null;
+  if (typeof retry.rootId !== 'string' || typeof retry.stageId !== 'string') return null;
+  return retry;
+}
+
+// Derive the translation button label from reconciled state, never from a
+// previous label or a stale local guess.
+function applyTranslateButtonState() {
+  const translate = latestState?.translate || {};
+  if (translate.active) {
+    tl2Translate.textContent = 'Stop';
+    tl2Translate.classList.add('danger');
+  } else {
+    tl2Translate.textContent = translateRetryDescriptor() ? 'Retry' : 'Translate';
+    tl2Translate.classList.remove('danger');
+  }
+  updateTranslationButtons();
+}
+
 function updateTranslationButtons() {
   const hasSource = resultEl.value.trim().length > 0;
   const hasResult = tl2Result.value.trim().length > 0;
   const isActive = tl2Translate.textContent === 'Stop';
-  tl2Translate.disabled = isActive ? false : !hasSource;
+  const canRetry = Boolean(translateRetryDescriptor());
+  tl2Translate.disabled = isActive ? false : !(hasSource || canRetry);
   tl2Copy.disabled = !hasResult;
   tl2Save.disabled = !hasResult;
   tl2Download.disabled = !hasResult;
@@ -786,10 +872,11 @@ function updateResultButtons() {
 async function retryFormat() {
   if (!currentTabId) return;
   const descriptor = latestState?.format?.retry;
-  if (!descriptor) {
+  if (!descriptor || typeof descriptor !== 'object') {
     formatRetryStatus.textContent = 'No saved formatting operation is available.';
     return;
   }
+  viewGeneration += 1;
   formatRetryBtn.disabled = true;
   formatRetryStatus.textContent = 'Formatting...';
   try {
@@ -881,19 +968,15 @@ function renderState(state) {
       setTl2Progress(state.translate.status);
     }
     if (state.translate.active) {
-      tl2Translate.textContent = 'Stop';
-      tl2Translate.classList.add('danger');
       tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
-    } else if (tl2Translate.textContent === 'Stop') {
-      tl2Translate.textContent = 'Translate';
-      tl2Translate.classList.remove('danger');
     }
     if (state.translate.error) {
       setTl2Progress(state.translate.error);
     }
   }
 
+  renderedTabId = currentTabId;
   updateResultButtons();
-  updateTranslationButtons();
+  applyTranslateButtonState();
   updateFormatButtons();
 }
