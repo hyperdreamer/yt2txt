@@ -155,6 +155,14 @@ let latestState = null;
 let currentTabId = null;
 let userEditedResult = false;
 let tlUserEdited = false;
+// Monotonic view generation.  Every relevant background event and every
+// local start/stop/retry command advances it.  A worker snapshot captured
+// before an advance is stale: rendering it would resurrect superseded
+// activity or overwrite a newer result, so it is discarded instead.
+let viewGeneration = 0;
+// Tab whose fully hydrated state is currently on screen.  Until a tab has
+// one, a discarded snapshot still needs to be re-requested.
+let renderedTabId = null;
 
 // ── Tab switching ──────────────────────────────────────────────
 tabs.forEach((tab) => {
@@ -233,50 +241,53 @@ fileBridgeHostInput.addEventListener('change', saveFileBridgeSettings);
 fileBridgePortInput.addEventListener('change', saveFileBridgeSettings);
 
 // ── Background messages ───────────────────────────────────────
+// Registered at module scope so no snapshot request can be answered before
+// the listeners exist.
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'state:update') {
     if (message.tabId !== currentTabId) return;
+    viewGeneration += 1;
     renderState(message.state);
     return;
   }
-  if (message?.type === 'translation:update') {
+  if (message?.type === 'translation:update' || message?.type === 'tl2:translating') {
     if (message.tabId !== currentTabId) return;
-    if (message.text) {
-      tl2Result.value = message.text;
-    } else if (message.error) {
-      // Error path: keep any existing result visible
+    // Partial messages are only meaningful for the stage currently on
+    // screen.  A late partial from a superseded root must never repaint.
+    if (!partialOwnershipMatches(message)) return;
+    viewGeneration += 1;
+    if (message.type === 'translation:update') {
+      if (message.text) tl2Result.value = message.text;
+      // Error path keeps any existing result visible.
+      if (latestState?.translate) latestState.translate.active = false;
+      setTl2Progress(message.text ? 'Translation complete.' : (message.error || 'Translation failed.'));
+      applyTranslateButtonState();
+      return;
     }
-    tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = !message.text;
-    tl2Translate.textContent = 'Translate';
-    tl2Translate.classList.remove('danger');
-    chrome.storage.local.remove(`tl2Translating:${currentTabId}`);
-    setTl2Progress(message.text ? 'Translation complete.' : (message.error || 'Translation failed.'));
-    updateTranslationButtons();
-    return;
-  }
-  if (message?.type === 'tl2:translating') {
-    if (message.tabId !== currentTabId) return;
-    if (message.value) {
-      tl2Translate.textContent = 'Stop';
-      tl2Translate.classList.add('danger');
-      tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
-      setTl2Progress('Translating...');
-    } else {
-      tl2Translate.textContent = 'Translate';
-      tl2Translate.classList.remove('danger');
-      updateTranslationButtons();
-    }
+    if (latestState?.translate) latestState.translate.active = message.value === true;
+    if (message.value) setTl2Progress('Translating...');
+    applyTranslateButtonState();
     return;
   }
 });
+
+function partialOwnershipMatches(message) {
+  const rootId = latestState?.rootId;
+  const stageId = latestState?.stageId;
+  if (typeof message.rootId !== 'string' || typeof message.stageId !== 'string') return false;
+  return message.rootId === rootId && message.stageId === stageId;
+}
 
 // ── Init ───────────────────────────────────────────────────────
 async function init() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const newTabId = tab?.id || null;
   // Reset user-edited flag when switching tabs so the new tab's
-  // transcript populates the textarea instead of being blocked.
+  // transcript populates the textarea instead of being blocked.  A new tab
+  // also invalidates any snapshot still in flight for the previous one.
   if (newTabId !== currentTabId) {
+    viewGeneration += 1;
+    renderedTabId = null;
     userEditedResult = false;
     tlUserEdited = false;
     formatRetryRow.classList.add('hidden');
@@ -328,65 +339,13 @@ async function init() {
   }
   updateSourceChip();
 
-  // Refresh state from background
+  // Refresh state from the worker. Reconciliation hydrates transcript,
+  // transformation results, active stage IDs, and retry descriptors.
   await refreshState();
-
-  // Load persisted transcript result (keyed by tabId+URL)
-  const resultKey = currentTabId ? `transcript:${currentTabId}` : null;
-  if (!resultEl.value.trim() && resultKey) {
-    const stored = await chrome.storage.local.get(resultKey);
-    const entry = stored[resultKey];
-    if (entry) {
-      if (
-        typeof entry === 'object' &&
-        (entry.url === tab?.url ||
-          sourceKey(entry.url) === sourceKey(tab?.url ?? ''))
-      ) {
-        resultEl.value = entry.text || '';
-      } else if (typeof entry === 'string') {
-        // Legacy format (pre-URL-keyed)
-        resultEl.value = entry;
-      }
-      // Otherwise: stored URL doesn't match → leave textarea empty
-    }
-  }
-
-  // Restore auto-format result (may have completed while popup was closed)
-  const fmtResultKey = currentTabId ? `fmtResult:${currentTabId}` : null;
-  if (fmtResultKey && !formatResult.value.trim()) {
-    const fmtStored = await chrome.storage.local.get(fmtResultKey);
-    if (fmtStored[fmtResultKey]) {
-      formatResult.value = fmtStored[fmtResultKey];
-      formatCopy.disabled = false;
-      formatSave.disabled = false;
-    }
-  }
-
-  // Restore translation result (may have completed while popup was closed)
-  const tlResultKey = currentTabId ? `translate:result:${currentTabId}` : null;
-  if (tlResultKey && !tl2Result.value.trim()) {
-    const tlStored = await chrome.storage.local.get(tlResultKey);
-    if (tlStored[tlResultKey]) {
-      tl2Result.value = tlStored[tlResultKey];
-      tl2Copy.disabled = false;
-      tl2Save.disabled = false;
-      tl2Download.disabled = false;
-    }
-  }
 
   // Load translation tab language preference (global)
   const { tl2Language: tl2Lang } = await chrome.storage.sync.get({ tl2Language: 'original' });
   tl2Language.value = tl2Lang || 'original';
-
-  if (currentTabId) {
-    // Restore "Stop" button state if mid-translation
-    const tl2Translating = await chrome.storage.local.get(`tl2Translating:${currentTabId}`);
-    if (tl2Translating[`tl2Translating:${currentTabId}`]) {
-      tl2Translate.textContent = 'Stop';
-      tl2Translate.classList.add('danger');
-      setTl2Progress('Translating...');
-    }
-  }
 
   loadPathSuggestions();
 
@@ -545,15 +504,46 @@ function updatePathSuggestions(current) {
 }
 
 // ── State sync ─────────────────────────────────────────────────
+// Capture the view a continuation belongs to.  Local commands must not
+// repaint the DOM after a newer render has taken ownership of the view.
+function captureView() {
+  return { generation: viewGeneration, tabId: currentTabId };
+}
+
+function viewOwns(view) {
+  return Boolean(view) && view.generation === viewGeneration && view.tabId === currentTabId;
+}
+
+// One reconciled worker snapshot is the only hydration source.  The popup
+// never rebuilds state from its own storage reads.
 async function refreshState() {
-  try {
-    const response = await chrome.runtime.sendMessage({ type: 'popup:get-state' });
-    if (response?.ok) {
-      currentTabId = response.tabId || currentTabId;
-      renderState(response.state);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const generation = viewGeneration;
+    const tabId = currentTabId;
+    let response;
+    try {
+      response = await chrome.runtime.sendMessage({ type: 'popup:get-state' });
+    } catch {
+      // Background may not be ready
+      return;
     }
-  } catch {
-    // Background may not be ready
+    if (generation !== viewGeneration || tabId !== currentTabId) {
+      // A newer background event or local command already owns the view.
+      // Only ask again while this tab has no rendered state at all.
+      if (renderedTabId === currentTabId) return;
+      continue;
+    }
+    if (!response?.ok || !response.state) return;
+    const responseTabId = response.tabId === undefined || response.tabId === null
+      ? tabId
+      : response.tabId;
+    if (tabId !== null && responseTabId !== tabId) {
+      if (renderedTabId === currentTabId) return;
+      continue;
+    }
+    if (responseTabId !== null) currentTabId = responseTabId;
+    renderState(response.state);
+    return;
   }
 }
 
@@ -567,6 +557,8 @@ async function startCapture() {
     return;
   }
 
+  viewGeneration += 1;
+  const view = captureView();
   userEditedResult = false;
   formatRetryRow.classList.add('hidden');
   resultEl.value = '';
@@ -585,6 +577,8 @@ async function startCapture() {
       url,
       force: forceCheckbox.checked,
     });
+    // A newer event or command owns the view now; this response is stale.
+    if (!viewOwns(view)) return;
     forceCheckbox.checked = false;
     if (!response?.ok) {
       statusBar.textContent = response?.error || 'Failed to start.';
@@ -594,6 +588,7 @@ async function startCapture() {
       stopBtn.classList.add('hidden');
     }
   } catch (e) {
+    if (!viewOwns(view)) return;
     statusBar.textContent = e.message || 'Failed to start.';
     statusBar.className = 'status-bar error';
     startBtn.disabled = false;
@@ -603,9 +598,15 @@ async function startCapture() {
 }
 
 async function stopCapture() {
+  viewGeneration += 1;
   stopBtn.disabled = true;
   try {
-    await chrome.runtime.sendMessage({ type: 'popup:stop' });
+    await chrome.runtime.sendMessage({
+      type: 'popup:stop',
+      tabId: currentTabId,
+      rootId: latestState?.rootId,
+      stageId: latestState?.stageId,
+    });
   } catch {
     // Best effort
   }
@@ -640,11 +641,14 @@ function downloadText() {
 async function doFormat() {
   if (formatBtn.textContent === 'Stop') {
     // Stop in-progress format
+    viewGeneration += 1;
     formatBtn.disabled = true;
     try {
       await chrome.runtime.sendMessage({
         type: 'format:stop',
         tabId: currentTabId,
+        rootId: latestState?.rootId,
+        stageId: latestState?.stageId,
       });
     } catch {}
     return;
@@ -656,6 +660,8 @@ async function doFormat() {
     return;
   }
 
+  viewGeneration += 1;
+  const view = captureView();
   formatBtn.textContent = 'Stop';
   formatBtn.classList.add('danger');
   formatResult.value = '';
@@ -669,11 +675,14 @@ async function doFormat() {
       tabId: currentTabId,
       text,
     });
+    // A newer event or command owns the view now; this response is stale.
+    if (!viewOwns(view)) return;
     if (!response?.ok) {
       setFormatStatus(response?.error || 'Format failed.');
       resetFormatButton();
     }
   } catch (e) {
+    if (!viewOwns(view)) return;
     setFormatStatus(e.message || 'Format failed.');
     resetFormatButton();
   }
@@ -709,19 +718,51 @@ function updateFormatButtons() {
   const hasResult = formatResult.value.trim().length > 0;
   const isActive = formatBtn.textContent === 'Stop';
   formatBtn.disabled = isActive ? false : !hasSource;
-  formatCopy.disabled = !hasResult;
-  formatSave.disabled = !hasResult;
+  formatCopy.disabled = isActive || !hasResult;
+  formatSave.disabled = isActive || !hasResult;
 }
 
 // ── Translation panel actions ─────────────────────────────────
 async function doTranslation() {
   if (tl2Translate.textContent === 'Stop') {
+    viewGeneration += 1;
     tl2Translate.disabled = true;
     try {
-      await chrome.runtime.sendMessage({ type: 'translate:stop', tabId: currentTabId });
+      await chrome.runtime.sendMessage({
+        type: 'translate:stop',
+        tabId: currentTabId,
+        rootId: latestState?.rootId,
+        stageId: latestState?.stageId,
+      });
     } catch {
       // Best effort
     }
+    return;
+  }
+
+  // A durable interrupted record owns its own source text, language, and
+  // Force flag.  The descriptor is the only provenance the popup forwards.
+  const descriptor = translateRetryDescriptor();
+  if (descriptor) {
+    viewGeneration += 1;
+    const view = captureView();
+    tl2Translate.disabled = true;
+    setTl2Progress('Retrying translation...');
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'transform:retry',
+        tabId: currentTabId,
+        descriptor,
+      });
+      // A newer event or command owns the view now; this response is stale.
+      if (!viewOwns(view)) return;
+      if (!response?.ok) setTl2Progress(response?.error || 'Retry failed.');
+    } catch (e) {
+      if (!viewOwns(view)) return;
+      setTl2Progress(e.message || 'Retry failed.');
+    }
+    // Every stale continuation returned above, so the view is still ours.
+    applyTranslateButtonState();
     return;
   }
 
@@ -732,6 +773,8 @@ async function doTranslation() {
   }
   const language = tl2Language.value;
 
+  viewGeneration += 1;
+  const view = captureView();
   tl2Result.value = '';
   tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
 
@@ -743,6 +786,8 @@ async function doTranslation() {
       language,
     });
   } catch (e) {
+    // A newer event or command owns the view now; this failure is stale.
+    if (!viewOwns(view)) return;
     // sendMessage itself failed (SW terminated, context invalidated, etc.)
     setTl2Progress(`Failed to start translation: ${e.message || 'unknown error'}`);
     tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = false;
@@ -807,14 +852,39 @@ function setTl2Progress(msg) {
   }
 }
 
+function translateRetryDescriptor() {
+  const retry = latestState?.translate?.retry;
+  if (!retry || typeof retry !== 'object' || Array.isArray(retry)) return null;
+  // The worker routes `legacy` descriptors to the format stage, so only a
+  // record descriptor is a valid translation retry.
+  if (retry.kind !== 'record') return null;
+  if (typeof retry.rootId !== 'string' || typeof retry.stageId !== 'string') return null;
+  return retry;
+}
+
+// Derive the translation button label from reconciled state, never from a
+// previous label or a stale local guess.
+function applyTranslateButtonState() {
+  const translate = latestState?.translate || {};
+  if (translate.active) {
+    tl2Translate.textContent = 'Stop';
+    tl2Translate.classList.add('danger');
+  } else {
+    tl2Translate.textContent = translateRetryDescriptor() ? 'Retry' : 'Translate';
+    tl2Translate.classList.remove('danger');
+  }
+  updateTranslationButtons();
+}
+
 function updateTranslationButtons() {
   const hasSource = resultEl.value.trim().length > 0;
   const hasResult = tl2Result.value.trim().length > 0;
   const isActive = tl2Translate.textContent === 'Stop';
-  tl2Translate.disabled = isActive ? false : !hasSource;
-  tl2Copy.disabled = !hasResult;
-  tl2Save.disabled = !hasResult;
-  tl2Download.disabled = !hasResult;
+  const canRetry = Boolean(translateRetryDescriptor());
+  tl2Translate.disabled = isActive ? false : !(hasSource || canRetry);
+  tl2Copy.disabled = isActive || !hasResult;
+  tl2Save.disabled = isActive || !hasResult;
+  tl2Download.disabled = isActive || !hasResult;
 }
 
 function updateResultButtons() {
@@ -826,29 +896,33 @@ function updateResultButtons() {
 // ── Format retry (manual re-trigger of TextKit formatting) ─────
 async function retryFormat() {
   if (!currentTabId) return;
+  const descriptor = latestState?.format?.retry;
+  if (!descriptor || typeof descriptor !== 'object') {
+    formatRetryStatus.textContent = 'No saved formatting operation is available.';
+    return;
+  }
+  viewGeneration += 1;
+  const view = captureView();
   formatRetryBtn.disabled = true;
   formatRetryStatus.textContent = 'Formatting...';
   try {
-    const raw = await chrome.storage.local.get(`transcript_raw:${currentTabId}`);
-    const text = raw[`transcript_raw:${currentTabId}`];
-    if (!text) {
-      formatRetryStatus.textContent = 'No cached transcript available.';
-      return;
-    }
     const response = await chrome.runtime.sendMessage({
-      type: 'format:start',
+      type: 'transform:retry',
       tabId: currentTabId,
-      text,
+      descriptor,
     });
+    // A newer event or command owns the view now; this response is stale.
+    if (!viewOwns(view)) return;
     if (response?.ok) {
       formatRetryRow.classList.add('hidden');
     } else {
       formatRetryStatus.textContent = response?.error || 'Retry failed.';
     }
   } catch (e) {
+    if (!viewOwns(view)) return;
     formatRetryStatus.textContent = e.message || 'Retry failed.';
   } finally {
-    formatRetryBtn.disabled = false;
+    if (viewOwns(view)) formatRetryBtn.disabled = false;
   }
 }
 
@@ -870,8 +944,8 @@ function renderState(state) {
   }
 
   // Result text
-  if (!userEditedResult && latestState.transcript) {
-    resultEl.value = latestState.transcript;
+  if (!userEditedResult) {
+    resultEl.value = latestState.transcript || '';
   }
 
   // Buttons
@@ -880,60 +954,48 @@ function renderState(state) {
   stopBtn.classList.toggle('hidden', !isActive);
 
   // ── Format tab state (unified flow) ──
-  if (state.format) {
-    if (state.format.resultText) {
-      formatResult.value = state.format.resultText;
-    }
-    if (state.format.status) {
-      setFormatStatus(state.format.status);
-    }
-    if (state.format.active) {
-      formatBtn.textContent = 'Stop';
-      formatBtn.classList.add('danger');
-      formatCopy.disabled = true;
-      formatSave.disabled = true;
-    } else if (formatBtn.textContent === 'Stop') {
-      resetFormatButton();
-      if (state.format.resultText) {
-        formatCopy.disabled = false;
-        formatSave.disabled = false;
-      }
-    }
-    // Show the format-retry row when the format flow is idle but
-    // produced an error. This replaces the legacy format:update handler.
-    if (state.format.error && !state.format.active) {
-      formatRetryRow.classList.remove('hidden');
-      formatRetryStatus.textContent = state.format.error;
-    } else if (state.format.resultText) {
-      formatRetryRow.classList.add('hidden');
-    }
+  // Render the complete snapshot: an empty result, status, or descriptor in
+  // the newer state must clear whatever the previous root left on screen.
+  const formatState = state.format && typeof state.format === 'object' ? state.format : {};
+  const formatText = typeof formatState.resultText === 'string' ? formatState.resultText : '';
+  formatResult.value = formatText;
+  setFormatStatus(formatState.status || '');
+
+  if (formatState.active) {
+    formatBtn.textContent = 'Stop';
+    formatBtn.classList.add('danger');
+  } else {
+    resetFormatButton();
   }
+
+  // Show the retry row whenever reconciliation supplies a durable
+  // operation descriptor. The background owns source-text recovery.
+  if (formatState.retry && !formatState.active) {
+    formatRetryRow.classList.remove('hidden');
+    formatRetryStatus.textContent = formatState.error || 'Formatting can be retried.';
+  } else {
+    formatRetryRow.classList.add('hidden');
+    formatRetryStatus.textContent = '';
+  }
+  // The retry control follows the rendered snapshot, never a previous command.
+  formatRetryBtn.disabled = false;
 
   // ── Translate tab state ──
-  if (state.translate) {
-    if (state.translate.resultText && !tlUserEdited) {
-      tl2Result.value = state.translate.resultText;
-      tl2Copy.disabled = false;
-      tl2Save.disabled = false;
-      tl2Download.disabled = false;
-    }
-    if (state.translate.status) {
-      setTl2Progress(state.translate.status);
-    }
-    if (state.translate.active) {
-      tl2Translate.textContent = 'Stop';
-      tl2Translate.classList.add('danger');
-      tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
-    } else if (tl2Translate.textContent === 'Stop') {
-      tl2Translate.textContent = 'Translate';
-      tl2Translate.classList.remove('danger');
-    }
-    if (state.translate.error) {
-      setTl2Progress(state.translate.error);
-    }
+  const translateState = state.translate && typeof state.translate === 'object'
+    ? state.translate
+    : {};
+  const translateText = typeof translateState.resultText === 'string'
+    ? translateState.resultText
+    : '';
+  if (!tlUserEdited) tl2Result.value = translateText;
+  if (translateState.error) {
+    setTl2Progress(translateState.error);
+  } else {
+    setTl2Progress(translateState.status || '');
   }
 
+  renderedTabId = currentTabId;
   updateResultButtons();
-  updateTranslationButtons();
+  applyTranslateButtonState();
   updateFormatButtons();
 }
