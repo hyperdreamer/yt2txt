@@ -90,11 +90,6 @@ function createBackgroundHarness(options = {}) {
     commands: { onCommand: createEvent() }
   };
 
-  const scheduleTimeout = (...args) => {
-    const timer = options.setTimeout ? options.setTimeout(...args) : setTimeout(...args);
-    timer?.unref?.();
-    return timer;
-  };
   const context = {
     AbortController,
     DOMException,
@@ -109,7 +104,7 @@ function createBackgroundHarness(options = {}) {
       return options.fetch ? options.fetch(url, ...args) : fetch(url, ...args);
     },
     setInterval: () => 1,
-    setTimeout: scheduleTimeout,
+    setTimeout: options.setTimeout || setTimeout,
     structuredClone
   };
   context.globalThis = context;
@@ -914,6 +909,7 @@ test('keepalive case 9: tab close mid-transcript aborts, cleans up, and stops th
   harness.onTabRemoved.emit(1);
 
   assert.equal(harness.context.__transcriptControllers.has(1), false);
+  await waitFor(() => !harness.context.__isKeepAliveRunning(), 'tab-close storage cleanup did not finish');
   assert.equal(harness.context.__isKeepAliveRunning(), false);
 
   const result = await operation;

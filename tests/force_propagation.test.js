@@ -232,16 +232,25 @@ test('test_forced_chain_does_not_enable_translation', async () => {
 
 test('test_keyboard_and_standalone_actions_omit_force', async () => {
   const router = createFetchRouter();
-  const harness = createBackgroundHarness({ fetch: router.fetch });
+  const harness = createBackgroundHarness({ fetch: router.fetch,
+    tabUrl: 'https://example.test/keyboard',
+    syncValues: { yt2txtAutoTranslate: true, tl2Language: 'French' },
+  });
 
-  const keyboard = harness.context.handleStart({ url: 'https://example.test/keyboard' });
+  // E2-F12: drive the registered command, including its real provenance boundary.
+  const keyboard = Promise.all(harness.context.chrome.commands.onCommand.emit('get-transcript'));
   await waitFor(() => router.count('/transcript') === 1, 'keyboard transcript did not start');
   assert.deepEqual(router.entry('/transcript').body, { url: 'https://example.test/keyboard' });
   router.resolve('/transcript', jsonResponse({ text: 'keyboard raw', source: 'subtitles' }));
   await waitFor(() => router.count('/format') === 1, 'keyboard format did not start');
   assert.deepEqual(router.entry('/format').body, { text: 'keyboard raw' });
   router.resolve('/format', jsonResponse({ text: 'keyboard formatted' }));
+  await waitFor(() => router.count('/translate') === 1, 'keyboard translation did not start');
+  assert.deepEqual(router.entry('/translate').body, { text: 'keyboard formatted', language: 'French' });
+  router.resolve('/translate', jsonResponse({ text: 'keyboard translated' }));
   await keyboard;
+  await waitFor(() => !harness.context.__isKeepAliveRunning(), 'keyboard chain did not finish');
+  harness.syncValues.yt2txtAutoTranslate = false;
 
   const format = harness.context.handleFormatStart({ tabId: 1, text: 'standalone format', force: true });
   await waitFor(() => router.count('/format') === 2, 'standalone format did not start');
@@ -255,12 +264,12 @@ test('test_keyboard_and_standalone_actions_omit_force', async () => {
     language: 'French',
     force: true,
   });
-  await waitFor(() => router.count('/translate') === 1, 'standalone translation did not start');
-  assert.deepEqual(router.entry('/translate').body, {
+  await waitFor(() => router.count('/translate') === 2, 'standalone translation did not start');
+  assert.deepEqual(router.entry('/translate', 1).body, {
     text: 'standalone translation',
     language: 'French',
   });
-  router.resolve('/translate', jsonResponse({ text: 'standalone translated' }));
+  router.resolve('/translate', jsonResponse({ text: 'standalone translated' }), 1);
   await translate;
 });
 

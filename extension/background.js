@@ -120,10 +120,36 @@ function normalizeBackendSettings(host, port) {
 const operationOwnership = createOperationOwnership();
 const storageQueue = createStorageQueue(chrome.storage.local);
 const activeRoots = new Map();
+// Starts capture this clock before their first await, even before the tab is known.
+let acceptanceClock = 0;
+const acceptanceChanges = new Map();
+
+function fenceStarts(tabId) {
+  acceptanceChanges.set(tabId, ++acceptanceClock);
+}
+
+function canAcceptStart(tabId, acceptance) {
+  return (acceptanceChanges.get(tabId) || 0) <= acceptance;
+}
 
 function claimRoot(tabId, details) {
   const root = operationOwnership.claimRoot(tabId, details);
-  if (root) activeRoots.set(tabId, root);
+  if (!root) return null;
+  fenceStarts(tabId);
+  activeRoots.set(tabId, root);
+  // The new stage is registered synchronously by the caller. Keep coverage
+  // while removing registrations and display activity belonging to its predecessor.
+  abortTabControllers(tabId, false);
+  const state = states.get(tabId);
+  if (state) {
+    if (state.active) Object.assign(state, { active: false, status: 'Idle', progress: 'Ready', error: '' });
+    if (state.format?.active) Object.assign(state.format, { active: false, status: '', error: '' });
+    if (state.translate?.active) {
+      Object.assign(state.translate, { active: false, status: '', error: '' });
+      chrome.runtime.sendMessage({ type: 'tl2:translating', tabId, value: false }).catch(() => {});
+    }
+    Object.assign(state, { rootId: root.rootId, stageId: null, stopRequested: false });
+  }
   return root;
 }
 
@@ -214,12 +240,17 @@ async function queueOwnedTransaction(tabId, spec, context) {
     owner: () => isCurrent(context),
   });
   if (!isCurrent(context)) return { status: 'superseded' };
+  if (result.status !== 'committed') {
+    throw Object.assign(new Error('Unable to persist operation storage.'), { code: 'STORAGE_PUBLICATION' });
+  }
   return result;
 }
 
 async function queueCleanup(tabId, token, keys) {
+  const recoveryKey = transcriptRecoveryKey(tabId);
   return storageQueue.transact(tabId, {
-    keys,
+    keys: [...keys, recoveryKey],
+    set: { [recoveryKey]: { version: 1, rootId: token.rootId, terminal: 'stopped' } },
     remove: keys,
     cleanup: { token, rootId: token.rootId },
   });
@@ -317,6 +348,16 @@ const translateContexts = new Map();
 const formatContexts = new Map();
 const transcriptContexts = new Map();
 let keepAliveIntervalId = null;
+let pendingCleanups = 0;
+
+function retainCleanupCoverage() {
+  pendingCleanups++;
+  syncKeepAlive();
+  return () => {
+    pendingCleanups--;
+    syncKeepAlive();
+  };
+}
 
 function startKeepAlive() {
   if (keepAliveIntervalId) return;
@@ -332,12 +373,12 @@ function stopKeepAlive() {
 }
 
 function syncKeepAlive() {
-  const hasWork = transcriptControllers.size > 0 || formatControllers.size > 0 || translateControllers.size > 0;
+  const hasWork = pendingCleanups > 0 || transcriptControllers.size > 0 || formatControllers.size > 0 || translateControllers.size > 0;
   if (hasWork) startKeepAlive();
   else stopKeepAlive();
 }
 
-function abortTabControllers(tabId) {
+function abortTabControllers(tabId, resync = true) {
   for (const [map, contextMap] of [
     [transcriptControllers, transcriptContexts],
     [formatControllers, formatContexts],
@@ -348,17 +389,25 @@ function abortTabControllers(tabId) {
     map.delete(tabId);
     contextMap.delete(tabId);
   }
-  syncKeepAlive();
+  if (resync) syncKeepAlive();
 }
 
 // ── Clean up on tab close ───────────────────────────────────────
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  const releaseCoverage = retainCleanupCoverage();
+  fenceStarts(tabId);
   operationOwnership.markClosed(tabId);
   abortTabControllers(tabId);
   states.delete(tabId);
   if (lastActiveTabId === tabId) lastActiveTabId = null;
-  storageQueue.clear(tabId).catch(() => {});
   activeRoots.delete(tabId);
+  try {
+    await storageQueue.clear(tabId);
+  } catch (error) {
+    console.error('Unable to clear closed-tab storage:', error);
+  } finally {
+    releaseCoverage();
+  }
 });
 
 // ── Message routing ─────────────────────────────────────────────
@@ -423,11 +472,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ── Keyboard shortcut ───────────────────────────────────────────
 chrome.commands.onCommand.addListener(async (command) => {
   if (command !== 'get-transcript') return;
+  const acceptance = acceptanceClock;
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id || !tab?.url) return;
     if (tab.url.startsWith('chrome://') || tab.url.startsWith('about:')) return;
-    await handleStart({ url: tab.url });
+    await handleStart({ url: tab.url }, acceptance);
   } catch (error) {
     console.error('Command handler failed:', error);
   }
@@ -498,12 +548,13 @@ function validateLanguage(language) {
 }
 
 // ── Handle transcript start ─────────────────────────────────────
-async function handleStart(msg) {
-  const tab = await getActiveTab();
+async function handleStart(msg, acceptance = acceptanceClock) {
   if (!isNonEmptyString(msg?.url)) return { ok: false, error: 'URL is required.' };
+  const tab = await getActiveTab();
+  if (!canAcceptStart(tab.id, acceptance)) return { ok: false, error: 'Start was cancelled or superseded.' };
   const url = msg.url.trim();
-  const state = getState(tab.id);
-  if (state.active || transcriptControllers.has(tab.id)) {
+  const state = states.get(tab.id);
+  if (state?.active || transcriptControllers.has(tab.id)) {
     return { ok: false, error: 'A transcript extraction is already in progress.' };
   }
 
@@ -511,6 +562,7 @@ async function handleStart(msg) {
   if (!root) return { ok: false, error: 'The tab is no longer available.' };
   const context = stageForRoot(root, 'transcript', transcriptControllers, transcriptContexts);
   if (!context) return { ok: false, error: 'Unable to claim transcript operation.' };
+  getState(tab.id);
 
   updateState(tab.id, {
     active: true,
@@ -525,7 +577,13 @@ async function handleStart(msg) {
   let timeoutId = null;
   let timedOut = false;
   let accepted = false;
+  let formatContext = null;
   let resultText = '';
+  const ownsTimeout = () => timedOut && isCurrent(root) && transcriptContexts.get(tab.id) === context;
+  const transcriptIsRunning = () => {
+    if (ownsTimeout()) throw new Error(formatTimeoutMessage(TRANSCRIPT_TIMEOUT_MS));
+    return isCurrent(context);
+  };
   try {
     timeoutId = setTimeout(() => {
       timedOut = true;
@@ -533,7 +591,7 @@ async function handleStart(msg) {
     }, TRANSCRIPT_TIMEOUT_MS);
 
     const endpoint = await getYt2txtEndpoint('/transcript');
-    if (!isCurrent(context)) return { ok: true };
+    if (!transcriptIsRunning()) return { ok: true };
     updateState(tab.id, { progress: 'Sending request to backend...' }, context);
 
     const response = await fetchWithTimeout(
@@ -545,16 +603,18 @@ async function handleStart(msg) {
       },
       context.signal,
     );
-    if (!isCurrent(context)) return { ok: true };
+    if (!transcriptIsRunning()) return { ok: true };
     const payload = await parseJsonResponse(response);
-    if (!isCurrent(context)) return { ok: true };
+    if (!transcriptIsRunning()) return { ok: true };
     if (!response.ok) throw new Error(responseError(payload, response, 'Transcript failed.'));
     if (payload.error) throw new Error(payload.error);
     resultText = typeof payload.text === 'string' ? payload.text : '';
     if (!resultText) throw new Error('Transcript response was empty.');
-    if (!isCurrent(context)) return { ok: true };
+    if (!transcriptIsRunning()) return { ok: true };
+    clearTimeout(timeoutId);
+    timeoutId = null;
 
-    const formatContext = stageForRoot(root, 'format', formatControllers, formatContexts);
+    formatContext = stageForRoot(root, 'format', formatControllers, formatContexts);
     if (!formatContext || !isCurrent(context)) return { ok: true };
     const record = makeOperationRecord(formatContext, {
       stage: 'format',
@@ -588,6 +648,10 @@ async function handleStart(msg) {
 
     accepted = true;
     releaseStageContext(transcriptControllers, transcriptContexts, context);
+    const display = states.get(tab.id);
+    for (const stage of ['format', 'translate']) {
+      Object.assign(display[stage], { sourceText: '', resultText: '', active: false, status: '', error: '' });
+    }
     updateState(tab.id, {
       active: false,
       status: 'Complete',
@@ -606,21 +670,26 @@ async function handleStart(msg) {
     });
     return { ok: true };
   } catch (error) {
-    if (!isCurrent(context)) return { ok: true };
-    const errorMessage = isAbortError(error)
-      ? (timedOut ? formatTimeoutMessage(TRANSCRIPT_TIMEOUT_MS) : 'Stopped by user.')
-      : sanitizeError(error, 'Unknown error');
+    const terminalContext = ownsTimeout() ? root : context;
+    if (!isCurrent(terminalContext)) return { ok: true };
+    const errorMessage = timedOut
+      ? formatTimeoutMessage(TRANSCRIPT_TIMEOUT_MS)
+      : isAbortError(error) ? 'Stopped by user.' : sanitizeError(error, 'Unknown error');
     updateState(tab.id, {
       active: false,
       status: 'Error',
       progress: errorMessage,
       error: errorMessage,
       stopRequested: false,
-    }, context);
+    }, terminalContext);
+    if (error?.code === 'STORAGE_PUBLICATION') return { ok: false, error: errorMessage };
     return { ok: true };
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
-    if (!accepted) releaseStageContext(transcriptControllers, transcriptContexts, context);
+    if (!accepted) {
+      releaseStageContext(formatControllers, formatContexts, formatContext);
+      releaseStageContext(transcriptControllers, transcriptContexts, context);
+    }
     syncKeepAlive();
   }
 }
@@ -636,6 +705,8 @@ async function stopTab(tabId, kind) {
     state?.format?.active ||
     state?.translate?.active
   );
+  const releaseCoverage = retainCleanupCoverage();
+  fenceStarts(tabId);
   const token = operationOwnership.invalidate(tabId, 'stop');
   activeRoots.delete(tabId);
   abortTabControllers(tabId);
@@ -666,13 +737,18 @@ async function stopTab(tabId, kind) {
     broadcastState(tabId);
   }
 
-  const cleanup = await queueCleanup(tabId, token, [operationKey(tabId), translationActivityKey(tabId)]);
-  if (cleanup.status !== 'cleanup-applied') {
+  try {
+    const cleanup = await queueCleanup(tabId, token, [operationKey(tabId), translationActivityKey(tabId)]);
+    if (cleanup.status !== 'cleanup-applied' || !token.isCurrent()) {
+      return { ok: false, error: 'Unable to persist Stop cleanup.' };
+    }
+    chrome.runtime.sendMessage({ type: 'tl2:translating', tabId, value: false }).catch(() => {});
+    return { ok: true };
+  } catch {
     return { ok: false, error: 'Unable to persist Stop cleanup.' };
+  } finally {
+    releaseCoverage();
   }
-  chrome.runtime.sendMessage({ type: 'tl2:translating', tabId, value: false }).catch(() => {});
-  syncKeepAlive();
-  return { ok: true };
 }
 
 function handleStop(tabId) {
@@ -691,13 +767,12 @@ function handleFormatStop(tabId) {
 
 // ── Format operation ────────────────────────────────────────────
 async function persistRunningOperation(context, record, includeActivity) {
-  const keys = [operationKey(context.tabId)];
+  const keys = [operationKey(context.tabId), translationActivityKey(context.tabId)];
   const set = { [operationKey(context.tabId)]: record };
-  if (includeActivity) {
-    keys.push(translationActivityKey(context.tabId));
-    set[translationActivityKey(context.tabId)] = true;
-  }
-  const result = await queueOwnedTransaction(context.tabId, { keys, set }, context);
+  const remove = [];
+  if (includeActivity) set[translationActivityKey(context.tabId)] = true;
+  else remove.push(translationActivityKey(context.tabId));
+  const result = await queueOwnedTransaction(context.tabId, { keys, set, remove }, context);
   return result.status === 'committed';
 }
 
@@ -792,7 +867,7 @@ async function runFormat(context, details) {
     return { ok: true };
   } catch (error) {
     if (!isCurrent(context)) return { ok: true };
-    const errorMessage = isAbortError(error) ? 'Formatting stopped.' : sanitizeError(error, 'Formatting failed.');
+    let errorMessage = isAbortError(error) ? 'Formatting stopped.' : sanitizeError(error, 'Formatting failed.');
     const failedRecord = makeOperationRecord(context, {
       stage: 'format',
       status: 'failed',
@@ -801,7 +876,11 @@ async function runFormat(context, details) {
       language: null,
       error: errorMessage,
     });
-    await persistFailedOperation(context, failedRecord, false);
+    try {
+      await persistFailedOperation(context, failedRecord, false);
+    } catch {
+      errorMessage = `Unable to persist formatting failure. ${errorMessage}`;
+    }
     if (!isCurrent(context)) return { ok: true };
     updateStageState(tabId, 'format', {
       active: false,
@@ -814,16 +893,17 @@ async function runFormat(context, details) {
   }
 }
 
-async function handleFormatStart(msg) {
+async function handleFormatStart(msg, acceptance = acceptanceClock) {
   const tabId = msg?.tabId;
   const text = msg?.text;
   if (!tabId || !isNonEmptyString(text)) return { ok: false, error: 'Missing tabId or text' };
   const url = await getTabUrl(tabId, msg.url);
-  getState(tabId);
+  if (!canAcceptStart(tabId, acceptance)) return { ok: false, error: 'Start was cancelled or superseded.' };
   const root = claimRoot(tabId, { url, force: false });
   if (!root) return { ok: false, error: 'The tab is no longer available.' };
   const context = stageForRoot(root, 'format', formatControllers, formatContexts);
   if (!context) return { ok: false, error: 'Unable to claim formatting operation.' };
+  getState(tabId);
   return runFormat(context, { text, sourceKind: 'standalone' });
 }
 
@@ -838,78 +918,63 @@ async function runTranslate(context, details) {
     status: 'Translating...',
     error: '',
   }, context);
-  if (language === 'original') {
-    try {
-      if (!isCurrent(context)) return { ok: true };
-      const persisted = await queueOwnedTransaction(tabId, {
-        keys: [translationResultKey(tabId), operationKey(tabId), translationActivityKey(tabId)],
-        set: { [translationResultKey(tabId)]: text },
-        remove: [operationKey(tabId), translationActivityKey(tabId)],
-      }, context);
-      if (persisted.status !== 'committed' || !isCurrent(context)) return { ok: true };
-      updateStageState(tabId, 'translate', {
-        resultText: text,
-        status: 'Translation complete.',
-        active: false,
-        error: '',
-      }, context);
-      if (text) {
-        await autoCopyIfEnabled(text, context);
-        if (!isCurrent(context)) return { ok: true };
-        await autoSaveIfEnabled(text, context);
-      }
-      return { ok: true };
-    } finally {
-      releaseStageContext(translateControllers, translateContexts, context);
-    }
-  }
 
   try {
-    const record = makeOperationRecord(context, {
-      stage: 'translate',
-      status: 'running',
-      sourceText: text,
-      sourceKind,
-      language,
-      error: '',
-    });
-    if (!await persistRunningOperation(context, record, true)) {
+    if (language === 'original') {
+      await queueOwnedTransaction(tabId, {
+        keys: [translationActivityKey(tabId)],
+        set: { [translationActivityKey(tabId)]: true },
+      }, context);
+    } else {
+      const record = makeOperationRecord(context, {
+        stage: 'translate',
+        status: 'running',
+        sourceText: text,
+        sourceKind,
+        language,
+        error: '',
+      });
+      await persistRunningOperation(context, record, true);
+    }
+    if (!isCurrent(context)) return { ok: true };
+    chrome.runtime.sendMessage({ type: 'tl2:translating', tabId, value: true }).catch(() => {});
+
+    let translated = text;
+    if (language !== 'original') {
+      const endpoint = await getTextkitEndpoint('/translate');
       if (!isCurrent(context)) return { ok: true };
-      throw new Error('Unable to persist translation operation.');
+      const response = await fetch(
+        `${endpoint}?_=${Date.now()}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(translateBody(context, text, language)),
+          signal: context.signal,
+        },
+      );
+      if (!isCurrent(context)) return { ok: true };
+      const payload = await parseJsonResponse(response);
+      if (!isCurrent(context)) return { ok: true };
+      if (!response.ok) throw new Error(responseError(payload, response, 'Translation failed.'));
+      if (payload.error) throw new Error(payload.error);
+      translated = typeof payload.text === 'string' ? payload.text : '';
     }
     if (!isCurrent(context)) return { ok: true };
 
-    const endpoint = await getTextkitEndpoint('/translate');
-    if (!isCurrent(context)) return { ok: true };
-    const response = await fetch(
-      `${endpoint}?_=${Date.now()}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(translateBody(context, text, language)),
-        signal: context.signal,
-      },
-    );
-    if (!isCurrent(context)) return { ok: true };
-    const payload = await parseJsonResponse(response);
-    if (!isCurrent(context)) return { ok: true };
-    if (!response.ok) throw new Error(responseError(payload, response, 'Translation failed.'));
-    if (payload.error) throw new Error(payload.error);
-    const translated = typeof payload.text === 'string' ? payload.text : '';
-    if (!isCurrent(context)) return { ok: true };
-
-    const persisted = await queueOwnedTransaction(tabId, {
+    await queueOwnedTransaction(tabId, {
       keys: [translationResultKey(tabId), translationActivityKey(tabId)],
       set: { [translationResultKey(tabId)]: translated },
       remove: [translationActivityKey(tabId)],
     }, context);
-    if (persisted.status !== 'committed' || !isCurrent(context)) return { ok: true };
+    if (!isCurrent(context)) return { ok: true };
     updateStageState(tabId, 'translate', {
       resultText: translated,
       status: 'Translation complete.',
       active: false,
       error: '',
     }, context);
+    chrome.runtime.sendMessage({ type: 'translation:update', tabId, text: translated }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'tl2:translating', tabId, value: false }).catch(() => {});
     if (translated) {
       await autoCopyIfEnabled(translated, context);
       if (!isCurrent(context)) return { ok: true };
@@ -920,16 +985,27 @@ async function runTranslate(context, details) {
     return { ok: true };
   } catch (error) {
     if (!isCurrent(context)) return { ok: true };
-    const errorMessage = isAbortError(error) ? 'Translation stopped.' : sanitizeError(error, 'Translation failed.');
-    const failedRecord = makeOperationRecord(context, {
-      stage: 'translate',
-      status: 'failed',
-      sourceText: text,
-      sourceKind,
-      language,
-      error: errorMessage,
-    });
-    await persistFailedOperation(context, failedRecord, true);
+    let errorMessage = isAbortError(error) ? 'Translation stopped.' : sanitizeError(error, 'Translation failed.');
+    try {
+      if (language === 'original') {
+        await queueOwnedTransaction(tabId, {
+          keys: [operationKey(tabId), translationActivityKey(tabId)],
+          remove: [operationKey(tabId), translationActivityKey(tabId)],
+        }, context);
+      } else {
+        const failedRecord = makeOperationRecord(context, {
+          stage: 'translate',
+          status: 'failed',
+          sourceText: text,
+          sourceKind,
+          language,
+          error: errorMessage,
+        });
+        await persistFailedOperation(context, failedRecord, true);
+      }
+    } catch {
+      errorMessage = `Unable to persist translation failure. ${errorMessage}`;
+    }
     if (!isCurrent(context)) return { ok: true };
     updateStageState(tabId, 'translate', {
       active: false,
@@ -937,13 +1013,14 @@ async function runTranslate(context, details) {
       error: errorMessage,
     }, context);
     chrome.runtime.sendMessage({ type: 'translation:update', tabId, text: '', error: errorMessage }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'tl2:translating', tabId, value: false }).catch(() => {});
     return { ok: false, error: errorMessage };
   } finally {
     releaseStageContext(translateControllers, translateContexts, context);
   }
 }
 
-async function handleTranslateStart(msg) {
+async function handleTranslateStart(msg, acceptance = acceptanceClock) {
   const tabId = msg?.tabId;
   const text = msg?.text;
   const language = msg?.language;
@@ -952,30 +1029,47 @@ async function handleTranslateStart(msg) {
     return { ok: false, error: 'Unsupported translation language.' };
   }
   const url = await getTabUrl(tabId, msg.url);
-  getState(tabId);
+  if (!canAcceptStart(tabId, acceptance)) return { ok: false, error: 'Start was cancelled or superseded.' };
   const root = claimRoot(tabId, { url, force: false });
   if (!root) return { ok: false, error: 'The tab is no longer available.' };
   const context = stageForRoot(root, 'translate', translateControllers, translateContexts);
   if (!context) return { ok: false, error: 'Unable to claim translation operation.' };
+  getState(tabId);
   return runTranslate(context, { text, language, sourceKind: 'standalone' });
 }
 
 // ── Clipboard, save, and automatic effects ──────────────────────
+let offscreenCopyId = 0;
+let pendingOffscreenCopies = 0;
+
 async function copyToClipboard(text, context) {
   if (!text || (context && !isCurrent(context))) return false;
+  const copyId = ++offscreenCopyId;
+  pendingOffscreenCopies++;
   try {
-    await chrome.offscreen.createDocument({
-      url: 'offscreen.html',
-      reasons: ['CLIPBOARD', 'DOM_PARSER'],
-      justification: 'Clipboard access for auto-copy results',
-    });
-  } catch {}
-  if (context && !isCurrent(context)) return false;
-  chrome.runtime.sendMessage({ type: 'offscreen:copy', text }).catch(() => {});
-  setTimeout(() => {
-    if (!context || isCurrent(context)) chrome.offscreen.closeDocument().catch(() => {});
-  }, 2000);
-  return true;
+    try {
+      await chrome.offscreen.createDocument({
+        url: 'offscreen.html',
+        reasons: ['CLIPBOARD', 'DOM_PARSER'],
+        justification: 'Clipboard access for auto-copy results',
+      });
+    } catch {}
+    if (copyId !== offscreenCopyId || (context && !isCurrent(context))) return false;
+    chrome.runtime.sendMessage({ type: 'offscreen:copy', text }).catch(() => {});
+    return true;
+  } finally {
+    // Resource lifetime is independent of the provider stage. A newer copy
+    // reserves the document before awaiting creation and supersedes this timer.
+    pendingOffscreenCopies--;
+    if (pendingOffscreenCopies === 0) {
+      const cleanupId = offscreenCopyId;
+      setTimeout(() => {
+        if (cleanupId === offscreenCopyId && pendingOffscreenCopies === 0) {
+          return chrome.offscreen.closeDocument().catch(() => {});
+        }
+      }, 2000);
+    }
+  }
 }
 
 async function autoCopyIfEnabled(text, context) {
@@ -1122,18 +1216,23 @@ async function handleSaveTranslation(msg, ownerContext) {
 // ── Record retry seam ────────────────────────────────────────────
 function validOperationRecord(record, tabId, descriptor, tabUrl) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) return false;
-  if (record.version !== 1 || record.tabId !== tabId) return false;
+  const fields = ['version', 'rootId', 'stageId', 'tabId', 'stage', 'status', 'sourceText',
+    'sourceUrl', 'sourceKind', 'language', 'force', 'error'];
+  if (Object.keys(record).length !== fields.length || fields.some(key => !Object.hasOwn(record, key))) return false;
+  if (record.version !== 1 || !Number.isInteger(record.tabId) || record.tabId !== tabId) return false;
+  if (!isNonEmptyString(record.rootId) || !isNonEmptyString(record.stageId)) return false;
   if (record.rootId !== descriptor.rootId || record.stageId !== descriptor.stageId) return false;
   if (record.status !== 'failed' || !isNonEmptyString(record.sourceText)) return false;
   if (record.stage !== 'format' && record.stage !== 'translate') return false;
   if (record.sourceKind !== 'transcript' && record.sourceKind !== 'format' && record.sourceKind !== 'standalone') return false;
   if (typeof record.sourceUrl !== 'string' || record.sourceUrl !== tabUrl) return false;
-  if (typeof record.force !== 'boolean' || typeof record.error !== 'string') return false;
+  if (typeof record.force !== 'boolean' || !isNonEmptyString(record.error)) return false;
   if (record.stage === 'format') return record.language === null;
   return validateLanguage(record.language);
 }
 
 async function handleTransformRetry(message) {
+  const acceptance = acceptanceClock;
   const tabId = message?.tabId;
   const descriptor = message?.descriptor;
   if (!tabId || !descriptor || typeof descriptor !== 'object') {
@@ -1141,21 +1240,35 @@ async function handleTransformRetry(message) {
   }
   if (descriptor.kind === 'legacy') {
     const stored = await storageQueue.read(tabId, [transcriptRawKey(tabId), transcriptKey(tabId)]);
+    if (!canAcceptStart(tabId, acceptance)) return { ok: false, error: 'Retry was cancelled or superseded.' };
     const text = stored[transcriptRawKey(tabId)];
     const transcript = stored[transcriptKey(tabId)];
     if (!isNonEmptyString(text)) return { ok: false, error: 'No transcript is available to retry.' };
     const url = await getTabUrl(tabId);
+    if (!canAcceptStart(tabId, acceptance)) return { ok: false, error: 'Retry was cancelled or superseded.' };
     const savedUrl = transcript && typeof transcript === 'object' ? transcript.url : url;
     if (savedUrl && url && savedUrl !== url) return { ok: false, error: 'Retry source no longer matches this tab.' };
-    return handleFormatStart({ tabId, text, url: savedUrl || url });
+    const latest = await storageQueue.read(tabId, [transcriptRawKey(tabId), transcriptKey(tabId)]);
+    if (!canAcceptStart(tabId, acceptance)) return { ok: false, error: 'Retry was cancelled or superseded.' };
+    if (latest[transcriptRawKey(tabId)] !== text || latest[transcriptKey(tabId)]?.url !== transcript?.url) {
+      return { ok: false, error: 'The saved transcript is no longer retryable.' };
+    }
+    return handleFormatStart({ tabId, text, url: savedUrl || url }, acceptance);
   }
   if (descriptor.kind !== 'record' || !isNonEmptyString(descriptor.rootId) || !isNonEmptyString(descriptor.stageId)) {
     return { ok: false, error: 'Invalid retry descriptor.' };
   }
   const stored = await storageQueue.read(tabId, operationKey(tabId));
-  const record = stored[operationKey(tabId)];
+  if (!canAcceptStart(tabId, acceptance)) return { ok: false, error: 'Retry was cancelled or superseded.' };
+  const previous = stored[operationKey(tabId)];
   const tabUrl = await getTabUrl(tabId);
-  if (!validOperationRecord(record, tabId, descriptor, tabUrl)) {
+  if (!canAcceptStart(tabId, acceptance)) return { ok: false, error: 'Retry was cancelled or superseded.' };
+  const latest = await storageQueue.read(tabId, operationKey(tabId));
+  if (!canAcceptStart(tabId, acceptance)) return { ok: false, error: 'Retry was cancelled or superseded.' };
+  const record = latest[operationKey(tabId)];
+  if (!validOperationRecord(record, tabId, descriptor, tabUrl) ||
+      !validOperationRecord(previous, tabId, descriptor, tabUrl) ||
+      Object.keys(record).some(key => record[key] !== previous[key])) {
     return { ok: false, error: 'The saved operation is no longer retryable.' };
   }
   const root = claimRoot(tabId, { url: record.sourceUrl, force: record.force === true });
@@ -1163,10 +1276,12 @@ async function handleTransformRetry(message) {
   if (record.stage === 'format') {
     const context = stageForRoot(root, 'format', formatControllers, formatContexts);
     if (!context) return { ok: false, error: 'Unable to claim formatting retry.' };
+    getState(tabId);
     return runFormat(context, { text: record.sourceText, sourceKind: record.sourceKind });
   }
   const context = stageForRoot(root, 'translate', translateControllers, translateContexts);
   if (!context) return { ok: false, error: 'Unable to claim translation retry.' };
+  getState(tabId);
   return runTranslate(context, {
     text: record.sourceText,
     language: record.language,
