@@ -1,0 +1,15 @@
+digraph execution {
+  rankdir=LR;
+  subgraph cluster_extension_sequential {
+    label="extension-sequential";
+    "T-001" [label="Task 1: Add Operation Ownership and Per-Tab Storage Queue Seams\nCapable"];
+    "T-002" [label="Task 2: Integrate Root Ownership, Stage Handoffs, and Force Propagation\nCapable"];
+    "T-003" [label="Task 3: Add Versioned Records, Restart Reconciliation, and Durable Stop\nCapable"];
+    "T-004" [label="Task 4: Hydrate Popup State and Manual Retry Without Restoration Races\nAdvanced"];
+    "T-005" [label="Task 5: Document Deployment Order and Run the Complete Consumer Verification\nStandard"];
+  }
+  "T-001" -> "T-002";
+  "T-002" -> "T-003";
+  "T-003" -> "T-004";
+  "T-004" -> "T-005";
+}
