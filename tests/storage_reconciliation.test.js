@@ -219,6 +219,7 @@ function createBackgroundHarness({
   vm.runInContext(fs.readFileSync(BACKGROUND_PATH, 'utf8'), context, { filename: BACKGROUND_PATH });
   vm.runInContext(
     'var __states = states;' +
+      'var __storageQueue = storageQueue;' +
       'var __isKeepAliveRunning = () => keepAliveIntervalId !== null;',
     context,
   );
@@ -263,6 +264,25 @@ function completedMarker(rootId = 'saved-root') {
   return { version: 1, rootId, terminal: 'completed' };
 }
 
+function acceptedStorageSnapshot() {
+  return {
+    'transform:operation:1': savedRecord({ sourceText: 'accepted source' }),
+    'transcript_recovery:1': completedMarker('prior-terminal-root'),
+    'tl2Translating:1': true,
+    'transcript:1': { text: 'accepted transcript', url: 'https://example.test/video' },
+    'transcript_raw:1': 'accepted transcript',
+    'transcript_force:1': true,
+    'fmtResult:1': 'accepted formatted result',
+    'translate:result:1': 'accepted translation',
+  };
+}
+
+function assertStoppedStorage(local, rootId) {
+  assert.deepEqual(local.values['transcript_recovery:1'], stoppedMarker(rootId));
+  assert.equal(Object.hasOwn(local.values, 'transform:operation:1'), false);
+  assert.equal(Object.hasOwn(local.values, 'tl2Translating:1'), false);
+}
+
 test('test_successful_transcript_groups_raw_and_force_with_available_record', async () => {
   const router = createFetchRouter();
   const harness = createBackgroundHarness({ fetch: router.fetch });
@@ -284,38 +304,77 @@ test('test_successful_transcript_groups_raw_and_force_with_available_record', as
 
 test('test_stale_storage_write_rolls_back_before_recovery_read', async () => {
   const router = createFetchRouter();
-  const local = createPersistentStorage();
+  const accepted = acceptedStorageSnapshot();
+  const local = createPersistentStorage(accepted);
   const barrier = deferred();
-  let blocked = false;
+  const replacementBarrier = deferred();
+  let staleRecord;
+  let replacementBlocked = false;
   local.hooks.set = async next => {
-    if (!blocked && next['transform:operation:1']?.status === 'running') {
-      blocked = true;
+    const record = next['transform:operation:1'];
+    if (record?.sourceText === 'old source') {
+      staleRecord = record;
       await barrier.promise;
+    } else if (record?.sourceText === 'new source') {
+      replacementBlocked = true;
+      await replacementBarrier.promise;
     }
   };
   const harness = createBackgroundHarness({ fetch: router.fetch, local });
   const operation = harness.context.handleFormatStart({ tabId: 1, text: 'old source', url: harness.tab.url });
-  await waitFor(() => blocked, 'operation record write did not block');
+  await waitFor(() => staleRecord, 'operation record write did not block');
+  // Queue the observation before replacement persistence. Waiting for the new
+  // provider request would let its write hide a missing rollback.
+  const recoveryRead = harness.context.__storageQueue.read(1, Object.keys(accepted));
   const replacement = harness.context.handleFormatStart({ tabId: 1, text: 'new source', url: harness.tab.url });
-  await waitFor(() => harness.context.__states.get(1)?.format?.sourceText === 'new source', 'replacement root was not accepted');
-  barrier.resolve();
-  await waitFor(() => router.count('/format') === 1, 'replacement format did not start');
-  await operation;
 
-  const restarted = createBackgroundHarness({ local, fetch: createFetchRouter().fetch });
-  const recovered = await reconcile(restarted);
-  const acceptedRecord = local.values['transform:operation:1'];
-  assert.equal(acceptedRecord.sourceText, 'new source');
-  assert.deepEqual(plain(recovered.format.retry), {
-    kind: 'record',
-    rootId: acceptedRecord.rootId,
-    stageId: acceptedRecord.stageId,
-  });
-  assert.equal(recovered.format.sourceText, 'new source');
-  router.resolve('/format', jsonResponse({ text: 'new result' }));
-  await replacement;
+  try {
+    await waitFor(() => harness.context.__states.get(1)?.format?.sourceText === 'new source', 'replacement root was not accepted');
+    barrier.resolve();
+    const restored = await recoveryRead;
+    await waitFor(() => replacementBlocked, 'replacement storage write did not block');
+    assert.equal(router.count('/format'), 0, 'replacement must not dispatch before the recovery read');
+    assert.deepEqual(restored, accepted, 'queued recovery read must observe the entire accepted snapshot');
+    assert.deepEqual(local.values, accepted, 'stale values must be gone before replacement persistence');
+    assert.deepEqual(local.values['transcript_recovery:1'], completedMarker('prior-terminal-root'));
+    assert.notEqual(local.values['transform:operation:1'].rootId, staleRecord.rootId);
 
-  assert.equal(harness.local.values['fmtResult:1'], 'new result');
+    const recoveryRouter = createFetchRouter();
+    const restarted = createBackgroundHarness({ local, fetch: recoveryRouter.fetch });
+    const recovered = await reconcile(restarted);
+    assert.equal(recovered.format.sourceText, 'accepted source');
+    assert.deepEqual(plain(recovered.format.retry), {
+      kind: 'record', rootId: 'saved-root', stageId: 'saved-stage',
+    });
+    assert.deepEqual(local.values, accepted, 'restart must preserve the restored values and terminal owner');
+    assert.equal(recoveryRouter.calls.length, 0);
+    assert.equal(restarted.runtimeMessages.length, 0);
+    assert.equal(restarted.notifications.length, 0);
+
+    replacementBarrier.resolve();
+    await waitFor(() => router.count('/format') === 1, 'replacement format did not start');
+    await operation;
+
+    const replacementRestart = createBackgroundHarness({ local, fetch: createFetchRouter().fetch });
+    const replacementState = await reconcile(replacementRestart);
+    const acceptedRecord = local.values['transform:operation:1'];
+    assert.equal(acceptedRecord.sourceText, 'new source');
+    assert.deepEqual(plain(replacementState.format.retry), {
+      kind: 'record',
+      rootId: acceptedRecord.rootId,
+      stageId: acceptedRecord.stageId,
+    });
+    assert.equal(replacementState.format.sourceText, 'new source');
+    router.resolve('/format', jsonResponse({ text: 'new result' }));
+    await replacement;
+
+    assert.equal(harness.local.values['fmtResult:1'], 'new result');
+  } finally {
+    barrier.resolve();
+    replacementBarrier.resolve();
+    await harness.context.handleStop(1);
+    await Promise.all([operation, replacement]);
+  }
 });
 
 test('test_stop_ack_waits_for_terminal_marker_and_cleanup', async () => {
@@ -507,11 +566,14 @@ async function runAtAsyncBoundary(boundary) {
     entered = true;
     await gate.promise;
   };
+  const accepted = boundary === 'storage-set' || boundary === 'storage-remove'
+    ? acceptedStorageSnapshot()
+    : null;
   const local = boundary === 'recovery-read'
     ? createPersistentStorage({
       'transform:operation:1': savedRecord({ status: 'running', error: '' }),
     })
-    : createPersistentStorage();
+    : createPersistentStorage(accepted || {});
   const router = createFetchRouter();
   const harnessOptions = { local, fetch: router.fetch };
 
@@ -597,6 +659,7 @@ async function runAtAsyncBoundary(boundary) {
 
   return {
     boundary,
+    accepted,
     gate,
     harness,
     initialOperation,
@@ -611,11 +674,28 @@ async function interleaveAtBoundary(scenario, interleaving) {
   const state = context.__states.get(1);
   const originalRootId = state?.rootId || null;
   const initialFormatCalls = scenario.router.count('/format');
+  // Capture the queue result before Stop cleanup, replacement, or close can
+  // overwrite the stale transaction's keys and conceal a missing restoration.
+  const recoveryRead = scenario.accepted
+    ? context.__storageQueue.read(1, Object.keys(scenario.accepted))
+    : null;
+  const releaseAndCheckStorage = async () => {
+    scenario.release();
+    if (!recoveryRead) return;
+    const restored = await recoveryRead;
+    assert.deepEqual(
+      restored['transcript_recovery:1'],
+      completedMarker('prior-terminal-root'),
+      'rollback must restore the prior terminal marker and its owning root',
+    );
+    assert.deepEqual(restored, scenario.accepted, 'rollback must restore all accepted key values');
+    assert.notEqual(restored['transform:operation:1'].rootId, originalRootId);
+  };
   let newerOperation;
 
   if (interleaving === 'stop') {
     const stopping = context.handleStop(1);
-    scenario.release();
+    await releaseAndCheckStorage();
     assert.equal((await stopping).ok, true);
   } else if (interleaving === 'replacement') {
     newerOperation = context.handleFormatStart({ tabId: 1, text: 'replacement source', url: scenario.harness.tab.url });
@@ -623,16 +703,17 @@ async function interleaveAtBoundary(scenario, interleaving) {
       const current = context.__states.get(1);
       return current?.format?.sourceText === 'replacement source' && current.rootId !== originalRootId;
     }, 'replacement root was not accepted');
-    scenario.release();
+    await releaseAndCheckStorage();
     await waitFor(() => scenario.router.count('/format') === initialFormatCalls + 1, 'replacement format was not dispatched');
   } else if (interleaving === 'close') {
     const closing = scenario.harness.onTabRemoved.emit(1)[0];
-    scenario.release();
+    await releaseAndCheckStorage();
     await closing;
   } else if (interleaving === 'new-work') {
     const stopping = context.handleStop(1);
-    scenario.release();
+    await releaseAndCheckStorage();
     assert.equal((await stopping).ok, true);
+    if (scenario.accepted) assertStoppedStorage(scenario.harness.local, originalRootId);
     if (scenario.initialOperation) await scenario.initialOperation;
     if (scenario.reconciliation) await scenario.reconciliation;
     newerOperation = context.handleFormatStart({ tabId: 1, text: 'new work source', url: scenario.harness.tab.url });
@@ -654,10 +735,36 @@ async function interleaveAtBoundary(scenario, interleaving) {
   );
   assert.equal(scenario.harness.notifications.length, 0);
 
+  if (scenario.accepted) {
+    const local = scenario.harness.local;
+    if (interleaving === 'close') {
+      assert.deepEqual(local.values, {}, 'close must remove every tab-owned key');
+    } else {
+      const retainedKeys = [
+        'transcript:1', 'transcript_raw:1', 'transcript_force:1',
+        'fmtResult:1', 'translate:result:1',
+      ];
+      assert.deepEqual(selectValues(local.values, retainedKeys), selectValues(scenario.accepted, retainedKeys));
+      if (newerOperation) {
+        const newerRootId = context.__states.get(1).rootId;
+        assert.notEqual(newerRootId, originalRootId);
+        assert.equal(local.values['transform:operation:1'].rootId, newerRootId);
+        assert.equal(local.values['transform:operation:1'].sourceText,
+          interleaving === 'replacement' ? 'replacement source' : 'new work source');
+        assert.deepEqual(local.values['transcript_recovery:1'], availableMarker(newerRootId));
+        assert.equal(Object.hasOwn(local.values, 'tl2Translating:1'), false);
+      } else {
+        assertStoppedStorage(local, originalRootId);
+      }
+    }
+  }
+
   if (newerOperation) {
+    const newerRootId = context.__states.get(1).rootId;
     const stopping = context.handleStop(1);
     await stopping;
     await newerOperation;
+    if (scenario.accepted) assertStoppedStorage(scenario.harness.local, newerRootId);
   }
 }
 
