@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const { webcrypto } = require('node:crypto');
 
 const ROOT = path.resolve(__dirname, '..');
 const BACKGROUND_PATH = path.join(ROOT, 'extension', 'background.js');
@@ -89,22 +90,36 @@ function createBackgroundHarness(options = {}) {
     commands: { onCommand: createEvent() }
   };
 
+  const scheduleTimeout = (...args) => {
+    const timer = options.setTimeout ? options.setTimeout(...args) : setTimeout(...args);
+    timer?.unref?.();
+    return timer;
+  };
   const context = {
     AbortController,
+    DOMException,
     URL,
     chrome,
     clearInterval,
     clearTimeout,
     console,
+    crypto: webcrypto,
     fetch: (url, ...args) => {
       fetchCalls.push({ url: String(url), args });
       return options.fetch ? options.fetch(url, ...args) : fetch(url, ...args);
     },
     setInterval: () => 1,
-    setTimeout: options.setTimeout || setTimeout
+    setTimeout: scheduleTimeout,
+    structuredClone
   };
   context.globalThis = context;
   vm.createContext(context);
+  context.importScripts = (...files) => {
+    for (const file of files) {
+      const helperPath = path.join(ROOT, 'extension', file);
+      vm.runInContext(fs.readFileSync(helperPath, 'utf8'), context, { filename: helperPath });
+    }
+  };
   vm.runInContext(fs.readFileSync(BACKGROUND_PATH, 'utf8'), context, { filename: BACKGROUND_PATH });
 
   // Expose internal Maps and keepalive state via var aliases for tests.
@@ -485,7 +500,7 @@ test('handleTranslateStop aborts controller, removes storage key, resets state, 
   harness.context.__translateControllers.set(tabId, ctrl);
   harness.localData['tl2Translating:42'] = true;
 
-  harness.context.handleTranslateStop(tabId);
+  await harness.context.handleTranslateStop(tabId);
 
   // Controller deleted and aborted
   assert.equal(harness.context.__translateControllers.has(tabId), false);
@@ -539,7 +554,7 @@ test('handleTranslateStop with no active translation does not throw or broadcast
     translate: { active: false, status: 'Ready', error: '', resultText: '' }
   });
 
-  harness.context.handleTranslateStop(tabId);
+  await harness.context.handleTranslateStop(tabId);
 
   // No state:update (translate was not active)
   const updates = harness.runtimeMessages.filter(m => m.type === 'state:update' && m.tabId === tabId);
@@ -872,20 +887,20 @@ test('keepalive case 8: auto-translate chain has no keepalive gap across the for
   // not be the one that stops the interval).
   assert.equal(harness.context.__translateControllers.has(1), true);
   assert.equal(harness.context.__isKeepAliveRunning(), true);
-  // One stop is expected earlier: transcript→format handoff (transcript entry deleted
-  // before the format controller registers). No *second* stop may happen here.
-  assert.equal(stopCount, 1, 'keepalive must not stop during the format→translate handoff');
+  // No keepalive stop is expected: the successor is registered before the
+  // predecessor is released.
+  assert.equal(stopCount, 0, 'keepalive must stay registered during the format→translate handoff');
 
   await operation;
   assert.equal(harness.context.__isKeepAliveRunning(), true, 'translate must still keep the interval running');
-  assert.equal(stopCount, 1);
+  assert.equal(stopCount, 0);
 
   router.resolve('/translate', jsonResponse({ text: 'TRADUIT' }));
   await waitFor(
     () => !harness.context.__isKeepAliveRunning() && !harness.context.__translateControllers.has(1),
     'keepalive did not stop after auto-translate completed'
   );
-  assert.equal(stopCount, 2, 'exactly one stop per idle transition (transcript→format, translate→idle)');
+  assert.equal(stopCount, 1, 'the only stop should occur after auto-translate completes');
 });
 
 test('keepalive case 9: tab close mid-transcript aborts, cleans up, and stops the interval', async () => {
