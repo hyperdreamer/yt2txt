@@ -1006,3 +1006,320 @@ test('test_popup_never_reads_or_removes_worker_owned_activity_keys', async () =>
   assert.notEqual(harness.elements['tl2-translate'].textContent, 'Stop');
   assert.equal(harness.elements.result.value, 'UPDATED');
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// Local command responses are generation-guarded (T4-01)
+//
+// A start/format/translate/retry command captures `{generation, tabId}`
+// before it awaits the worker.  If a newer background event lands while the
+// command is in flight, the command's response must not repaint the view:
+// the newer render wins.
+// ═══════════════════════════════════════════════════════════════════
+
+function formatBlock(resultText, status, extra = {}) {
+  return {
+    sourceText: 'TRANSCRIPT TEXT',
+    sourceUrl: 'https://youtube.com/watch?v=test',
+    sourceKind: 'transcript',
+    force: false,
+    resultText,
+    active: false,
+    status,
+    error: '',
+    retry: null,
+    ...extra,
+  };
+}
+
+function newerTranscriptState(format = formatBlock('', '')) {
+  return hydratedState({
+    status: 'Complete',
+    progress: 'Transcript ready (source: subtitles).',
+    transcript: 'FRESH TRANSCRIPT',
+    rootId: 'root-new',
+    stageId: 'stage-new',
+    format,
+  });
+}
+
+test('test_delayed_start_response_cannot_overwrite_newer_state_event', async () => {
+  const harness = createPopupHarness({
+    state: hydratedState({ transcript: '', rootId: 'root-old', stageId: 'stage-old' }),
+  });
+  await harness.context.init();
+
+  harness.elements.force.checked = true;
+  const pending = harness.defer('popup:start');
+  const command = harness.context.startCapture();
+
+  // A newer worker state arrives while the start command is still in flight.
+  harness.emit({ type: 'state:update', tabId: 1, state: newerTranscriptState() });
+  assert.equal(harness.elements.result.value, 'FRESH TRANSCRIPT');
+
+  pending.resolve({ ok: false, error: 'STALE START ERROR' });
+  await command;
+
+  assert.equal(harness.elements['status-bar'].textContent,
+    'Transcript ready (source: subtitles).',
+    'a stale start response must not replace the newer status');
+  assert.equal(harness.elements.result.value, 'FRESH TRANSCRIPT');
+  assert.equal(harness.elements.start.disabled, false,
+    'a stale start response must not re-enable its own start button state');
+  assert.equal(harness.elements.force.disabled, false);
+  assert.equal(harness.elements.stop.classList.contains('hidden'), true);
+  assert.equal(harness.elements.force.checked, true,
+    'a stale start response must not clear the Force control of the newer view');
+});
+
+test('test_delayed_format_response_cannot_overwrite_newer_state_event', async () => {
+  const harness = createPopupHarness({
+    state: hydratedState({ transcript: 'TRANSCRIPT TEXT', rootId: 'root-old', stageId: 'stage-old' }),
+  });
+  await harness.context.init();
+
+  const pending = harness.defer('format:start');
+  const command = harness.context.doFormat();
+  assert.equal(harness.elements['format-btn'].textContent, 'Stop');
+
+  harness.emit({
+    type: 'state:update',
+    tabId: 1,
+    state: newerTranscriptState(formatBlock('FRESH FORMAT', 'Formatted')),
+  });
+  assert.equal(harness.elements['format-result'].value, 'FRESH FORMAT');
+
+  pending.resolve({ ok: false, error: 'STALE FORMAT ERROR' });
+  await command;
+
+  assert.equal(harness.elements['format-status-bar'].textContent, 'Formatted',
+    'a stale format response must not replace the newer status');
+  assert.equal(harness.elements['format-result'].value, 'FRESH FORMAT');
+  assert.equal(harness.elements['format-btn'].textContent, 'Format');
+  assert.equal(harness.elements['format-copy'].disabled, false);
+  assert.equal(harness.elements['format-save'].disabled, false);
+});
+
+test('test_delayed_translate_start_response_cannot_overwrite_newer_state_event', async () => {
+  const harness = createPopupHarness({
+    state: hydratedState({ transcript: 'TRANSCRIPT TEXT', rootId: 'root-old', stageId: 'stage-old' }),
+  });
+  await harness.context.init();
+  harness.elements['tl2-language'].value = 'German';
+
+  const pending = harness.defer('translate:start');
+  const command = harness.context.doTranslation();
+
+  harness.emit({
+    type: 'state:update',
+    tabId: 1,
+    state: hydratedState({
+      status: 'Complete',
+      progress: 'Transcript ready (source: subtitles).',
+      transcript: 'FRESH TRANSCRIPT',
+      rootId: 'root-new',
+      stageId: 'stage-new',
+      translate: {
+        sourceText: 'FRESH TRANSCRIPT',
+        sourceUrl: 'https://youtube.com/watch?v=test',
+        sourceKind: 'transcript',
+        force: false,
+        targetLanguage: 'German',
+        resultText: 'FRESH TRANSLATION',
+        active: false,
+        status: 'Translation complete.',
+        error: '',
+        retry: null,
+      },
+    }),
+  });
+  assert.equal(harness.elements['tl2-result'].value, 'FRESH TRANSLATION');
+
+  pending.reject(new Error('STALE TRANSLATE ERROR'));
+  await command;
+
+  assert.equal(harness.elements['tl2-status-bar'].textContent, 'Translation complete.',
+    'a stale translate failure must not replace the newer status');
+  assert.equal(harness.elements['tl2-result'].value, 'FRESH TRANSLATION');
+  assert.equal(harness.elements['tl2-copy'].disabled, false);
+});
+
+test('test_delayed_translation_retry_response_cannot_overwrite_newer_state_event', async () => {
+  const descriptor = { kind: 'record', rootId: 'root-tl', stageId: 'stage-tl', language: 'German' };
+  const harness = createPopupHarness({
+    state: hydratedState({
+      transcript: 'TRANSCRIPT TEXT',
+      rootId: 'root-tl',
+      stageId: 'stage-tl',
+      translate: {
+        sourceText: 'SAVED SOURCE',
+        sourceUrl: 'https://youtube.com/watch?v=test',
+        sourceKind: 'format',
+        force: false,
+        targetLanguage: 'German',
+        resultText: '',
+        active: false,
+        status: 'Translation failed.',
+        error: 'Translation failed.',
+        retry: descriptor,
+      },
+    }),
+  });
+  await harness.context.init();
+  assert.equal(harness.elements['tl2-translate'].textContent, 'Retry');
+
+  const pending = harness.defer('transform:retry');
+  const command = harness.context.doTranslation();
+  assert.equal(harness.elements['tl2-status-bar'].textContent, 'Retrying translation...');
+
+  harness.emit({
+    type: 'state:update',
+    tabId: 1,
+    state: hydratedState({
+      transcript: 'TRANSCRIPT TEXT',
+      rootId: 'root-tl',
+      stageId: 'stage-tl',
+      translate: {
+        sourceText: 'SAVED SOURCE',
+        sourceUrl: 'https://youtube.com/watch?v=test',
+        sourceKind: 'format',
+        force: false,
+        targetLanguage: 'German',
+        resultText: '',
+        active: true,
+        status: 'Translating...',
+        error: '',
+        retry: null,
+      },
+    }),
+  });
+  assert.equal(harness.elements['tl2-translate'].textContent, 'Stop');
+
+  pending.resolve({ ok: false, error: 'STALE RETRY ERROR' });
+  await command;
+
+  assert.equal(harness.elements['tl2-status-bar'].textContent, 'Translating...',
+    'a stale retry response must not replace the newer status');
+  assert.equal(harness.elements['tl2-translate'].textContent, 'Stop',
+    'a stale retry response must not re-derive the button from stale state');
+  assert.equal(harness.elements['tl2-translate'].disabled, false);
+});
+
+test('test_delayed_format_retry_response_cannot_overwrite_newer_state_event', async () => {
+  const descriptor = { kind: 'record', rootId: 'root-fmt', stageId: 'stage-fmt' };
+  const harness = createPopupHarness({
+    state: hydratedState({
+      transcript: 'TRANSCRIPT TEXT',
+      rootId: 'root-fmt',
+      stageId: 'stage-fmt',
+      format: formatBlock('', 'Formatting failed.', {
+        error: 'Formatting failed.',
+        retry: descriptor,
+      }),
+    }),
+  });
+  await harness.context.init();
+  assert.equal(harness.elements['format-retry-row'].classList.contains('hidden'), false);
+
+  const pending = harness.defer('transform:retry');
+  const command = harness.context.retryFormat();
+  assert.equal(harness.elements['format-retry-status'].textContent, 'Formatting...');
+
+  harness.emit({ type: 'state:update', tabId: 1, state: newerTranscriptState() });
+  assert.equal(harness.elements['format-retry-row'].classList.contains('hidden'), true);
+
+  pending.resolve({ ok: false, error: 'STALE RETRY ERROR' });
+  await command;
+
+  assert.equal(harness.elements['format-retry-row'].classList.contains('hidden'), true,
+    'a stale retry response must not resurrect the retry row');
+  assert.equal(harness.elements['format-retry-status'].textContent, '',
+    'a stale retry response must not write into the retry status');
+
+  // A later retryable snapshot must own the control again: the stale command's
+  // disabled state must not survive into a fresh render.
+  harness.emit({
+    type: 'state:update',
+    tabId: 1,
+    state: hydratedState({
+      transcript: 'TRANSCRIPT TEXT',
+      rootId: 'root-fmt',
+      stageId: 'stage-fmt',
+      format: formatBlock('', 'Formatting failed.', {
+        error: 'Formatting failed.',
+        retry: descriptor,
+      }),
+    }),
+  });
+  assert.equal(harness.elements['format-retry-row'].classList.contains('hidden'), false);
+  assert.equal(harness.elements['format-retry'].disabled, false,
+    'a fresh render must re-enable the retry control');
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// renderState renders the complete snapshot (T4-02)
+// ═══════════════════════════════════════════════════════════════════
+
+test('test_newer_root_state_clears_stale_results_statuses_and_controls', async () => {
+  const harness = createPopupHarness({
+    state: hydratedState({
+      status: 'Complete',
+      progress: 'Transcript ready (source: subtitles).',
+      transcript: 'OLD TRANSCRIPT',
+      rootId: 'root-old',
+      stageId: 'stage-old',
+      format: formatBlock('OLD FORMAT', 'Formatted'),
+      translate: {
+        sourceText: 'OLD FORMAT',
+        sourceUrl: 'https://youtube.com/watch?v=test',
+        sourceKind: 'format',
+        force: false,
+        targetLanguage: 'German',
+        resultText: 'OLD TRANSLATION',
+        active: false,
+        status: 'Translation complete.',
+        error: '',
+        retry: { kind: 'record', rootId: 'root-old', stageId: 'stage-old-tl' },
+      },
+    }),
+  });
+  await harness.context.init();
+
+  // Hydration really did restore the saved results and controls.
+  assert.equal(harness.elements['format-result'].value, 'OLD FORMAT');
+  assert.equal(harness.elements['tl2-result'].value, 'OLD TRANSLATION');
+  assert.equal(harness.elements['format-status-bar'].textContent, 'Formatted');
+  assert.equal(harness.elements['tl2-status-bar'].textContent, 'Translation complete.');
+  assert.equal(harness.elements['format-copy'].disabled, false);
+  assert.equal(harness.elements['format-save'].disabled, false);
+  assert.equal(harness.elements['tl2-copy'].disabled, false);
+  assert.equal(harness.elements['tl2-save'].disabled, false);
+  assert.equal(harness.elements['tl2-download'].disabled, false);
+  assert.equal(harness.elements['tl2-translate'].textContent, 'Retry');
+
+  // A full snapshot for a newer root with no saved results at all.
+  harness.emit({ type: 'state:update', tabId: 1, state: newerTranscriptState() });
+
+  assert.equal(harness.elements['format-result'].value, '',
+    'the format textarea must clear when the newer state says it is empty');
+  assert.equal(harness.elements['tl2-result'].value, '',
+    'the translation textarea must clear when the newer state says it is empty');
+  assert.equal(harness.elements['format-status-bar'].textContent, '',
+    'the format status must reset when the newer state has none');
+  assert.equal(harness.elements['tl2-status-bar'].textContent, '',
+    'the translation status must reset when the newer state has none');
+  assert.equal(harness.elements['format-copy'].disabled, true,
+    'copy controls must follow the rendered value, not the previous one');
+  assert.equal(harness.elements['format-save'].disabled, true);
+  assert.equal(harness.elements['tl2-copy'].disabled, true);
+  assert.equal(harness.elements['tl2-save'].disabled, true);
+  assert.equal(harness.elements['tl2-download'].disabled, true);
+  assert.equal(harness.elements['format-btn'].textContent, 'Format');
+  assert.equal(harness.elements['tl2-translate'].textContent, 'Translate',
+    'the newer state has no retry descriptor, so the action is not a retry');
+  assert.equal(harness.elements.result.value, 'FRESH TRANSCRIPT');
+
+  // No effect was launched by rendering the newer snapshot.
+  assert.equal(harness.messagesOfType('transform:retry').length, 0);
+  assert.equal(harness.messagesOfType('format:start').length, 0);
+  assert.equal(harness.messagesOfType('translate:start').length, 0);
+});

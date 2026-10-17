@@ -504,6 +504,16 @@ function updatePathSuggestions(current) {
 }
 
 // ── State sync ─────────────────────────────────────────────────
+// Capture the view a continuation belongs to.  Local commands must not
+// repaint the DOM after a newer render has taken ownership of the view.
+function captureView() {
+  return { generation: viewGeneration, tabId: currentTabId };
+}
+
+function viewOwns(view) {
+  return Boolean(view) && view.generation === viewGeneration && view.tabId === currentTabId;
+}
+
 // One reconciled worker snapshot is the only hydration source.  The popup
 // never rebuilds state from its own storage reads.
 async function refreshState() {
@@ -548,6 +558,7 @@ async function startCapture() {
   }
 
   viewGeneration += 1;
+  const view = captureView();
   userEditedResult = false;
   formatRetryRow.classList.add('hidden');
   resultEl.value = '';
@@ -566,6 +577,8 @@ async function startCapture() {
       url,
       force: forceCheckbox.checked,
     });
+    // A newer event or command owns the view now; this response is stale.
+    if (!viewOwns(view)) return;
     forceCheckbox.checked = false;
     if (!response?.ok) {
       statusBar.textContent = response?.error || 'Failed to start.';
@@ -575,6 +588,7 @@ async function startCapture() {
       stopBtn.classList.add('hidden');
     }
   } catch (e) {
+    if (!viewOwns(view)) return;
     statusBar.textContent = e.message || 'Failed to start.';
     statusBar.className = 'status-bar error';
     startBtn.disabled = false;
@@ -647,6 +661,7 @@ async function doFormat() {
   }
 
   viewGeneration += 1;
+  const view = captureView();
   formatBtn.textContent = 'Stop';
   formatBtn.classList.add('danger');
   formatResult.value = '';
@@ -660,11 +675,14 @@ async function doFormat() {
       tabId: currentTabId,
       text,
     });
+    // A newer event or command owns the view now; this response is stale.
+    if (!viewOwns(view)) return;
     if (!response?.ok) {
       setFormatStatus(response?.error || 'Format failed.');
       resetFormatButton();
     }
   } catch (e) {
+    if (!viewOwns(view)) return;
     setFormatStatus(e.message || 'Format failed.');
     resetFormatButton();
   }
@@ -727,6 +745,7 @@ async function doTranslation() {
   const descriptor = translateRetryDescriptor();
   if (descriptor) {
     viewGeneration += 1;
+    const view = captureView();
     tl2Translate.disabled = true;
     setTl2Progress('Retrying translation...');
     try {
@@ -735,12 +754,15 @@ async function doTranslation() {
         tabId: currentTabId,
         descriptor,
       });
+      // A newer event or command owns the view now; this response is stale.
+      if (!viewOwns(view)) return;
       if (!response?.ok) setTl2Progress(response?.error || 'Retry failed.');
     } catch (e) {
+      if (!viewOwns(view)) return;
       setTl2Progress(e.message || 'Retry failed.');
-    } finally {
-      applyTranslateButtonState();
     }
+    // Every stale continuation returned above, so the view is still ours.
+    applyTranslateButtonState();
     return;
   }
 
@@ -752,6 +774,7 @@ async function doTranslation() {
   const language = tl2Language.value;
 
   viewGeneration += 1;
+  const view = captureView();
   tl2Result.value = '';
   tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
 
@@ -763,6 +786,8 @@ async function doTranslation() {
       language,
     });
   } catch (e) {
+    // A newer event or command owns the view now; this failure is stale.
+    if (!viewOwns(view)) return;
     // sendMessage itself failed (SW terminated, context invalidated, etc.)
     setTl2Progress(`Failed to start translation: ${e.message || 'unknown error'}`);
     tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = false;
@@ -877,6 +902,7 @@ async function retryFormat() {
     return;
   }
   viewGeneration += 1;
+  const view = captureView();
   formatRetryBtn.disabled = true;
   formatRetryStatus.textContent = 'Formatting...';
   try {
@@ -885,15 +911,18 @@ async function retryFormat() {
       tabId: currentTabId,
       descriptor,
     });
+    // A newer event or command owns the view now; this response is stale.
+    if (!viewOwns(view)) return;
     if (response?.ok) {
       formatRetryRow.classList.add('hidden');
     } else {
       formatRetryStatus.textContent = response?.error || 'Retry failed.';
     }
   } catch (e) {
+    if (!viewOwns(view)) return;
     formatRetryStatus.textContent = e.message || 'Retry failed.';
   } finally {
-    formatRetryBtn.disabled = false;
+    if (viewOwns(view)) formatRetryBtn.disabled = false;
   }
 }
 
@@ -925,54 +954,44 @@ function renderState(state) {
   stopBtn.classList.toggle('hidden', !isActive);
 
   // ── Format tab state (unified flow) ──
-  if (state.format) {
-    if (state.format.resultText) {
-      formatResult.value = state.format.resultText;
-      formatCopy.disabled = false;
-      formatSave.disabled = false;
-    }
-    if (state.format.status) {
-      setFormatStatus(state.format.status);
-    }
-    if (state.format.active) {
-      formatBtn.textContent = 'Stop';
-      formatBtn.classList.add('danger');
-      formatCopy.disabled = true;
-      formatSave.disabled = true;
-    } else if (formatBtn.textContent === 'Stop') {
-      resetFormatButton();
-      if (state.format.resultText) {
-        formatCopy.disabled = false;
-        formatSave.disabled = false;
-      }
-    }
-    // Show the retry row whenever reconciliation supplies a durable
-    // operation descriptor. The background owns source-text recovery.
-    if (state.format.retry && !state.format.active) {
-      formatRetryRow.classList.remove('hidden');
-      formatRetryStatus.textContent = state.format.error || 'Formatting can be retried.';
-    } else {
-      formatRetryRow.classList.add('hidden');
-    }
+  // Render the complete snapshot: an empty result, status, or descriptor in
+  // the newer state must clear whatever the previous root left on screen.
+  const formatState = state.format && typeof state.format === 'object' ? state.format : {};
+  const formatText = typeof formatState.resultText === 'string' ? formatState.resultText : '';
+  formatResult.value = formatText;
+  setFormatStatus(formatState.status || '');
+
+  if (formatState.active) {
+    formatBtn.textContent = 'Stop';
+    formatBtn.classList.add('danger');
+  } else {
+    resetFormatButton();
   }
 
+  // Show the retry row whenever reconciliation supplies a durable
+  // operation descriptor. The background owns source-text recovery.
+  if (formatState.retry && !formatState.active) {
+    formatRetryRow.classList.remove('hidden');
+    formatRetryStatus.textContent = formatState.error || 'Formatting can be retried.';
+  } else {
+    formatRetryRow.classList.add('hidden');
+    formatRetryStatus.textContent = '';
+  }
+  // The retry control follows the rendered snapshot, never a previous command.
+  formatRetryBtn.disabled = false;
+
   // ── Translate tab state ──
-  if (state.translate) {
-    if (state.translate.resultText && !tlUserEdited) {
-      tl2Result.value = state.translate.resultText;
-      tl2Copy.disabled = false;
-      tl2Save.disabled = false;
-      tl2Download.disabled = false;
-    }
-    if (state.translate.status) {
-      setTl2Progress(state.translate.status);
-    }
-    if (state.translate.active) {
-      tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = true;
-    }
-    if (state.translate.error) {
-      setTl2Progress(state.translate.error);
-    }
+  const translateState = state.translate && typeof state.translate === 'object'
+    ? state.translate
+    : {};
+  const translateText = typeof translateState.resultText === 'string'
+    ? translateState.resultText
+    : '';
+  if (!tlUserEdited) tl2Result.value = translateText;
+  if (translateState.error) {
+    setTl2Progress(translateState.error);
+  } else {
+    setTl2Progress(translateState.status || '');
   }
 
   renderedTabId = currentTabId;
