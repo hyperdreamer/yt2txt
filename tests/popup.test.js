@@ -179,7 +179,13 @@ function createPopupHarness(options = {}) {
     },
     runtime: {
       onMessage: { addListener() {} },
-      sendMessage(msg) { runtimeMessages.push(msg); return Promise.resolve({ ok: true }); },
+      sendMessage(msg) {
+        runtimeMessages.push(msg);
+        if (msg?.type === 'popup:get-state') {
+          return Promise.resolve({ ok: true, tabId: 1, state: options.state || { transcript: '' } });
+        }
+        return Promise.resolve({ ok: true });
+      },
     },
     commands: { onCommand: { addListener() {} } },
   };
@@ -597,7 +603,7 @@ test('init() hides the chip for a relative path', async () => {
 
 test('init() restores a legacy string entry', async () => {
   const harness = createPopupHarness({
-    localData: { 'transcript:1': 'LEGACY' },
+    state: { transcript: 'LEGACY' },
   });
   await harness.context.init();
   assert.equal(harness.elements['result'].value, 'LEGACY');
@@ -606,7 +612,7 @@ test('init() restores a legacy string entry', async () => {
 test('init() restores an object entry matching tab.url', async () => {
   const harness = createPopupHarness({
     tabUrl: 'https://youtube.com/watch?v=test',
-    localData: { 'transcript:1': { text: 'MATCHED', url: 'https://youtube.com/watch?v=test' } },
+    state: { transcript: 'MATCHED' },
   });
   await harness.context.init();
   assert.equal(harness.elements['result'].value, 'MATCHED');
@@ -615,7 +621,7 @@ test('init() restores an object entry matching tab.url', async () => {
 test('init() restores a raw local path entry on the equivalent file:// tab', async () => {
   const harness = createPopupHarness({
     tabUrl: 'file:///a/My%20Video.mp4',
-    localData: { 'transcript:1': { text: 'LOCAL TEXT', url: '/a/My Video.mp4' } },
+    state: { transcript: 'LOCAL TEXT' },
   });
   await harness.context.init();
   assert.equal(harness.elements['result'].value, 'LOCAL TEXT');
@@ -624,7 +630,7 @@ test('init() restores a raw local path entry on the equivalent file:// tab', asy
 test('init() leaves the textarea empty for a mismatching URL', async () => {
   const harness = createPopupHarness({
     tabUrl: 'https://youtube.com/watch?v=test',
-    localData: { 'transcript:1': { text: 'OTHER', url: 'https://youtube.com/other' } },
+    state: { transcript: '' },
   });
   await harness.context.init();
   assert.equal(harness.elements['result'].value, '');

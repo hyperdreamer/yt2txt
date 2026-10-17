@@ -249,7 +249,6 @@ chrome.runtime.onMessage.addListener((message) => {
     tl2Copy.disabled = tl2Save.disabled = tl2Download.disabled = !message.text;
     tl2Translate.textContent = 'Translate';
     tl2Translate.classList.remove('danger');
-    chrome.storage.local.remove(`tl2Translating:${currentTabId}`);
     setTl2Progress(message.text ? 'Translation complete.' : (message.error || 'Translation failed.'));
     updateTranslationButtons();
     return;
@@ -328,65 +327,13 @@ async function init() {
   }
   updateSourceChip();
 
-  // Refresh state from background
+  // Refresh state from the worker. Reconciliation hydrates transcript,
+  // transformation results, active stage IDs, and retry descriptors.
   await refreshState();
-
-  // Load persisted transcript result (keyed by tabId+URL)
-  const resultKey = currentTabId ? `transcript:${currentTabId}` : null;
-  if (!resultEl.value.trim() && resultKey) {
-    const stored = await chrome.storage.local.get(resultKey);
-    const entry = stored[resultKey];
-    if (entry) {
-      if (
-        typeof entry === 'object' &&
-        (entry.url === tab?.url ||
-          sourceKey(entry.url) === sourceKey(tab?.url ?? ''))
-      ) {
-        resultEl.value = entry.text || '';
-      } else if (typeof entry === 'string') {
-        // Legacy format (pre-URL-keyed)
-        resultEl.value = entry;
-      }
-      // Otherwise: stored URL doesn't match → leave textarea empty
-    }
-  }
-
-  // Restore auto-format result (may have completed while popup was closed)
-  const fmtResultKey = currentTabId ? `fmtResult:${currentTabId}` : null;
-  if (fmtResultKey && !formatResult.value.trim()) {
-    const fmtStored = await chrome.storage.local.get(fmtResultKey);
-    if (fmtStored[fmtResultKey]) {
-      formatResult.value = fmtStored[fmtResultKey];
-      formatCopy.disabled = false;
-      formatSave.disabled = false;
-    }
-  }
-
-  // Restore translation result (may have completed while popup was closed)
-  const tlResultKey = currentTabId ? `translate:result:${currentTabId}` : null;
-  if (tlResultKey && !tl2Result.value.trim()) {
-    const tlStored = await chrome.storage.local.get(tlResultKey);
-    if (tlStored[tlResultKey]) {
-      tl2Result.value = tlStored[tlResultKey];
-      tl2Copy.disabled = false;
-      tl2Save.disabled = false;
-      tl2Download.disabled = false;
-    }
-  }
 
   // Load translation tab language preference (global)
   const { tl2Language: tl2Lang } = await chrome.storage.sync.get({ tl2Language: 'original' });
   tl2Language.value = tl2Lang || 'original';
-
-  if (currentTabId) {
-    // Restore "Stop" button state if mid-translation
-    const tl2Translating = await chrome.storage.local.get(`tl2Translating:${currentTabId}`);
-    if (tl2Translating[`tl2Translating:${currentTabId}`]) {
-      tl2Translate.textContent = 'Stop';
-      tl2Translate.classList.add('danger');
-      setTl2Progress('Translating...');
-    }
-  }
 
   loadPathSuggestions();
 
@@ -605,7 +552,12 @@ async function startCapture() {
 async function stopCapture() {
   stopBtn.disabled = true;
   try {
-    await chrome.runtime.sendMessage({ type: 'popup:stop' });
+    await chrome.runtime.sendMessage({
+      type: 'popup:stop',
+      tabId: currentTabId,
+      rootId: latestState?.rootId,
+      stageId: latestState?.stageId,
+    });
   } catch {
     // Best effort
   }
@@ -645,6 +597,8 @@ async function doFormat() {
       await chrome.runtime.sendMessage({
         type: 'format:stop',
         tabId: currentTabId,
+        rootId: latestState?.rootId,
+        stageId: latestState?.stageId,
       });
     } catch {}
     return;
@@ -718,7 +672,12 @@ async function doTranslation() {
   if (tl2Translate.textContent === 'Stop') {
     tl2Translate.disabled = true;
     try {
-      await chrome.runtime.sendMessage({ type: 'translate:stop', tabId: currentTabId });
+      await chrome.runtime.sendMessage({
+        type: 'translate:stop',
+        tabId: currentTabId,
+        rootId: latestState?.rootId,
+        stageId: latestState?.stageId,
+      });
     } catch {
       // Best effort
     }
@@ -826,19 +785,18 @@ function updateResultButtons() {
 // ── Format retry (manual re-trigger of TextKit formatting) ─────
 async function retryFormat() {
   if (!currentTabId) return;
+  const descriptor = latestState?.format?.retry;
+  if (!descriptor) {
+    formatRetryStatus.textContent = 'No saved formatting operation is available.';
+    return;
+  }
   formatRetryBtn.disabled = true;
   formatRetryStatus.textContent = 'Formatting...';
   try {
-    const raw = await chrome.storage.local.get(`transcript_raw:${currentTabId}`);
-    const text = raw[`transcript_raw:${currentTabId}`];
-    if (!text) {
-      formatRetryStatus.textContent = 'No cached transcript available.';
-      return;
-    }
     const response = await chrome.runtime.sendMessage({
-      type: 'format:start',
+      type: 'transform:retry',
       tabId: currentTabId,
-      text,
+      descriptor,
     });
     if (response?.ok) {
       formatRetryRow.classList.add('hidden');
@@ -870,8 +828,8 @@ function renderState(state) {
   }
 
   // Result text
-  if (!userEditedResult && latestState.transcript) {
-    resultEl.value = latestState.transcript;
+  if (!userEditedResult) {
+    resultEl.value = latestState.transcript || '';
   }
 
   // Buttons
@@ -883,6 +841,8 @@ function renderState(state) {
   if (state.format) {
     if (state.format.resultText) {
       formatResult.value = state.format.resultText;
+      formatCopy.disabled = false;
+      formatSave.disabled = false;
     }
     if (state.format.status) {
       setFormatStatus(state.format.status);
@@ -899,12 +859,12 @@ function renderState(state) {
         formatSave.disabled = false;
       }
     }
-    // Show the format-retry row when the format flow is idle but
-    // produced an error. This replaces the legacy format:update handler.
-    if (state.format.error && !state.format.active) {
+    // Show the retry row whenever reconciliation supplies a durable
+    // operation descriptor. The background owns source-text recovery.
+    if (state.format.retry && !state.format.active) {
       formatRetryRow.classList.remove('hidden');
-      formatRetryStatus.textContent = state.format.error;
-    } else if (state.format.resultText) {
+      formatRetryStatus.textContent = state.format.error || 'Formatting can be retried.';
+    } else {
       formatRetryRow.classList.add('hidden');
     }
   }
