@@ -166,8 +166,9 @@ keyboard shortcut always run with Force off, even if the checkbox is still ticke
 - Force off is *omitted*, not sent as `false`. An ordinary request contains only
   the fields an older backend already requires, so a backend that predates `force`
   sees exactly the request shape it always saw.
-- Force on is `force: true` on `POST /transcript`, `POST /format`, and
-  `POST /translate`. Only a TextKit that understands the field accepts it.
+- Force on is `force: true` on `POST /transcript` (served by the YT2TXT backend,
+  which already accepted the field) and on `POST /format` and `POST /translate`
+  (served by TextKit, where only an updated TextKit accepts it).
 - If an older TextKit rejects `force`, the rejection is surfaced as the normal
   stage error and nothing else happens. The extension never silently retries the
   same stage without Force — a forced refresh that quietly fell back to the cache
@@ -209,13 +210,21 @@ keeps a small durable operation record per tab so an interrupted stage survives 
 restart instead of vanishing or being silently re-run:
 
 - `transform:operation:<tabId>` holds the version-1 record for an in-flight or
-  failed format/translation stage (stage, status, exact source text, source URL,
-  source kind, language, Force, error).
+  failed format/translation stage. The record carries twelve fields — `version`,
+  `rootId`, `stageId`, `tabId`, `stage`, `status`, exact source text, source URL,
+  source kind, language, Force, and error — and reconciliation validates them
+  exactly, so a record with any other field set is ignored.
 - `transcript_recovery:<tabId>` holds the version-1 terminal marker that tells
   reconciliation whether an operation completed, was stopped, or is still
   available for a **manual retry**.
 - `transcript_force:<tabId>` remembers the Force provenance of the saved
   transcript so a **manual retry** of formatting reuses it.
+
+Each transcript, format, or translate chain is owned by **one root**. Claiming a
+newer root supersedes the older one and aborts its stages, so a late result or
+side effect arriving from a superseded stage is dropped rather than published: it
+cannot overwrite the newer chain's persisted text, create state, or launch a copy,
+save, or translation.
 
 Recovery is explicitly user-driven through the existing controls. Reopening the
 popup reconciles the record and shows a **Format Transcript** retry row next to
@@ -283,7 +292,9 @@ Returns `{"status": "ok"}`.
 {
   "url": "https://www.youtube.com/watch?v=...",
   "model": "gpt-4o-transcribe",  // optional, defaults to config
-  "force": false                  // optional, bypass cache
+  "force": false   // optional; this is the backend default. The extension
+                   // omits this field entirely when the checkbox is off
+                   // (see "What is on the wire" above)
 }
 ```
 
