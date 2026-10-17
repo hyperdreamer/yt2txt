@@ -41,12 +41,18 @@ function createEvent() {
   };
 }
 
-function jsonResponse(body, { ok = true, status = 200 } = {}) {
+function jsonResponse(body, { ok = true, status = 200, beforeJson, beforeText } = {}) {
   return {
     ok,
     status,
-    json: async () => structuredClone(body),
-    text: async () => JSON.stringify(body),
+    json: async () => {
+      await beforeJson?.();
+      return structuredClone(body);
+    },
+    text: async () => {
+      await beforeText?.();
+      return JSON.stringify(body);
+    },
   };
 }
 
@@ -135,10 +141,18 @@ function createPersistentStorage(initial = {}) {
   return area;
 }
 
-function createBackgroundHarness({ local, fetch, syncValues = {}, tabUrl = 'https://example.test/video' } = {}) {
+function createBackgroundHarness({
+  local,
+  fetch,
+  syncValues = {},
+  tabUrl = 'https://example.test/video',
+  beforeSyncGet,
+  beforeCreateDocument,
+} = {}) {
   const persistent = local || createPersistentStorage();
   const sync = { ...syncValues };
   const runtimeMessages = [];
+  const notifications = [];
   const onStorageChanged = createEvent();
   const onTabRemoved = createEvent();
   const tab = { id: 1, windowId: 10, active: true, url: tabUrl };
@@ -147,7 +161,12 @@ function createBackgroundHarness({ local, fetch, syncValues = {}, tabUrl = 'http
       onChanged: onStorageChanged,
       local: persistent,
       sync: {
-        get(defaults) { return Promise.resolve({ ...defaults, ...sync }); },
+        get(defaults) {
+          return Promise.resolve().then(async () => {
+            await beforeSyncGet?.(defaults);
+            return { ...defaults, ...sync };
+          });
+        },
         set(next) { Object.assign(sync, next); return Promise.resolve(); },
       },
     },
@@ -161,8 +180,13 @@ function createBackgroundHarness({ local, fetch, syncValues = {}, tabUrl = 'http
       sendMessage(message) { runtimeMessages.push(structuredClone(message)); return Promise.resolve(); },
       getPlatformInfo(callback) { callback?.({}); },
     },
-    offscreen: { createDocument: async () => {}, closeDocument: async () => {} },
-    notifications: { create() {} },
+    offscreen: {
+      createDocument: async details => { await beforeCreateDocument?.(details); },
+      closeDocument: async () => {},
+    },
+    notifications: {
+      create(...args) { notifications.push(args); },
+    },
     commands: { onCommand: createEvent() },
   };
   const unrefTimeout = (...args) => {
@@ -198,7 +222,7 @@ function createBackgroundHarness({ local, fetch, syncValues = {}, tabUrl = 'http
       'var __isKeepAliveRunning = () => keepAliveIntervalId !== null;',
     context,
   );
-  return { context, local: persistent, sync, runtimeMessages, onTabRemoved, tab };
+  return { context, local: persistent, sync, runtimeMessages, notifications, onTabRemoved, tab };
 }
 
 async function reconcile(harness) {
@@ -273,13 +297,24 @@ test('test_stale_storage_write_rolls_back_before_recovery_read', async () => {
   const operation = harness.context.handleFormatStart({ tabId: 1, text: 'old source', url: harness.tab.url });
   await waitFor(() => blocked, 'operation record write did not block');
   const replacement = harness.context.handleFormatStart({ tabId: 1, text: 'new source', url: harness.tab.url });
+  await waitFor(() => harness.context.__states.get(1)?.format?.sourceText === 'new source', 'replacement root was not accepted');
   barrier.resolve();
   await waitFor(() => router.count('/format') === 1, 'replacement format did not start');
-  router.resolve('/format', jsonResponse({ text: 'new result' }));
-  await replacement;
   await operation;
 
-  assert.equal(harness.local.values['transform:operation:1'], undefined);
+  const restarted = createBackgroundHarness({ local, fetch: createFetchRouter().fetch });
+  const recovered = await reconcile(restarted);
+  const acceptedRecord = local.values['transform:operation:1'];
+  assert.equal(acceptedRecord.sourceText, 'new source');
+  assert.deepEqual(plain(recovered.format.retry), {
+    kind: 'record',
+    rootId: acceptedRecord.rootId,
+    stageId: acceptedRecord.stageId,
+  });
+  assert.equal(recovered.format.sourceText, 'new source');
+  router.resolve('/format', jsonResponse({ text: 'new result' }));
+  await replacement;
+
   assert.equal(harness.local.values['fmtResult:1'], 'new result');
 });
 
@@ -403,7 +438,8 @@ test('test_absent_marker_allows_legacy_raw_force_recovery', async () => {
   const state = await reconcile(harness);
   assert.deepEqual(plain(state.format.retry), { kind: 'legacy' });
   assert.equal(state.format.sourceText, 'saved transcript');
-  assert.equal(state.format.force, undefined);
+  assert.equal(state.format.force, true);
+  assert.equal(state.force, true);
 });
 
 test('test_available_marker_allows_legacy_raw_recovery_without_completed_result', async () => {
@@ -417,6 +453,8 @@ test('test_available_marker_allows_legacy_raw_recovery_without_completed_result'
   const state = await reconcile(harness);
   assert.deepEqual(plain(state.format.retry), { kind: 'legacy' });
   assert.equal(state.format.sourceText, 'saved transcript');
+  assert.equal(state.format.force, false);
+  assert.equal(state.force, false);
   assert.equal(local.values['fmtResult:1'], undefined);
 });
 
@@ -457,6 +495,299 @@ test('test_record_url_mismatch_is_safe_and_nonretryable', async () => {
   assert.equal(state.format.retry, null);
   assert.equal(router.calls.length, 0);
   assert.deepEqual(local.values['transform:operation:1'], savedRecord({ sourceUrl: 'https://example.test/other' }));
+});
+
+async function runAtAsyncBoundary(boundary) {
+  const gate = deferred();
+  let entered = false;
+  let hookUsed = false;
+  const block = async () => {
+    if (hookUsed) return;
+    hookUsed = true;
+    entered = true;
+    await gate.promise;
+  };
+  const local = boundary === 'recovery-read'
+    ? createPersistentStorage({
+      'transform:operation:1': savedRecord({ status: 'running', error: '' }),
+    })
+    : createPersistentStorage();
+  const router = createFetchRouter();
+  const harnessOptions = { local, fetch: router.fetch };
+
+  if (boundary === 'storage-set') {
+    local.hooks.set = async next => {
+      if (next['transform:operation:1']?.status === 'running') await block();
+    };
+  } else if (boundary === 'storage-remove') {
+    local.hooks.remove = async keys => {
+      if (keys.includes('tl2Translating:1')) await block();
+    };
+  } else if (boundary === 'recovery-read') {
+    local.hooks.get = async keys => {
+      if (Array.isArray(keys) && keys.includes('transform:operation:1')) await block();
+    };
+  } else if (boundary === 'textkit-endpoint-settings') {
+    harnessOptions.beforeSyncGet = async defaults => {
+      if (Object.hasOwn(defaults, 'textkitHost')) await block();
+    };
+  } else if (boundary === 'auto-copy-settings') {
+    harnessOptions.syncValues = { fmtAutoCopy: true };
+    harnessOptions.beforeSyncGet = async defaults => {
+      if (Object.hasOwn(defaults, 'fmtAutoCopy')) await block();
+    };
+  } else if (boundary === 'auto-save-settings') {
+    harnessOptions.syncValues = { fmtAutoSave: true, fmtAutoSavePath: 'formatted.txt' };
+    harnessOptions.beforeSyncGet = async defaults => {
+      if (Object.hasOwn(defaults, 'fmtAutoSave')) await block();
+    };
+  } else if (boundary === 'auto-translate-settings') {
+    harnessOptions.syncValues = { yt2txtAutoTranslate: true, tl2Language: 'Japanese' };
+    harnessOptions.beforeSyncGet = async defaults => {
+      if (Object.hasOwn(defaults, 'yt2txtAutoTranslate')) await block();
+    };
+  } else if (boundary === 'filebridge-endpoint-settings') {
+    harnessOptions.syncValues = { fmtAutoSave: true, fmtAutoSavePath: 'formatted.txt' };
+    harnessOptions.beforeSyncGet = async defaults => {
+      if (Object.hasOwn(defaults, 'fileBridgeHost')) await block();
+    };
+  } else if (boundary === 'copy-setup') {
+    harnessOptions.syncValues = { fmtAutoCopy: true };
+    harnessOptions.beforeCreateDocument = block;
+  } else if (boundary === 'save-response') {
+    harnessOptions.syncValues = { fmtAutoSave: true, fmtAutoSavePath: 'formatted.txt' };
+  } else if (boundary === 'response-parse') {
+    harnessOptions.syncValues = { fmtAutoCopy: true };
+  }
+
+  const harness = createBackgroundHarness(harnessOptions);
+  let initialOperation;
+  let reconciliation;
+  if (boundary === 'recovery-read') {
+    reconciliation = reconcile(harness);
+    await waitFor(() => entered, 'reconciliation storage read did not block');
+  } else {
+    initialOperation = harness.context.handleFormatStart({
+      tabId: 1,
+      text: 'initial source',
+      url: harness.tab.url,
+    });
+    if (boundary === 'storage-set' || boundary === 'storage-remove' || boundary === 'textkit-endpoint-settings') {
+      await waitFor(() => entered, `${boundary} did not block`);
+    } else {
+      await waitFor(() => router.count('/format') === 1, 'initial format did not start');
+      if (boundary === 'response-parse') {
+        router.resolve('/format', jsonResponse({ text: 'formatted source' }, { beforeJson: block }));
+        await waitFor(() => entered, 'response parsing did not block');
+      } else {
+        router.resolve('/format', jsonResponse({ text: 'formatted source' }));
+        if (boundary === 'auto-copy-settings' || boundary === 'auto-save-settings' ||
+            boundary === 'auto-translate-settings' || boundary === 'filebridge-endpoint-settings') {
+          await waitFor(() => entered, `${boundary} did not block`);
+        } else if (boundary === 'copy-setup') {
+          await waitFor(() => entered, 'offscreen copy setup did not block');
+        } else if (boundary === 'save-response') {
+          await waitFor(() => router.count('/save') === 1, 'automatic save did not start');
+          router.resolve('/save', jsonResponse({ ok: true, path: 'formatted.txt' }, { beforeText: block }));
+          await waitFor(() => entered, 'save response read did not block');
+        }
+      }
+    }
+  }
+
+  return {
+    boundary,
+    gate,
+    harness,
+    initialOperation,
+    reconciliation,
+    router,
+    release() { gate.resolve(); },
+  };
+}
+
+async function interleaveAtBoundary(scenario, interleaving) {
+  const { context } = scenario.harness;
+  const state = context.__states.get(1);
+  const originalRootId = state?.rootId || null;
+  const initialFormatCalls = scenario.router.count('/format');
+  let newerOperation;
+
+  if (interleaving === 'stop') {
+    const stopping = context.handleStop(1);
+    scenario.release();
+    assert.equal((await stopping).ok, true);
+  } else if (interleaving === 'replacement') {
+    newerOperation = context.handleFormatStart({ tabId: 1, text: 'replacement source', url: scenario.harness.tab.url });
+    await waitFor(() => {
+      const current = context.__states.get(1);
+      return current?.format?.sourceText === 'replacement source' && current.rootId !== originalRootId;
+    }, 'replacement root was not accepted');
+    scenario.release();
+    await waitFor(() => scenario.router.count('/format') === initialFormatCalls + 1, 'replacement format was not dispatched');
+  } else if (interleaving === 'close') {
+    const closing = scenario.harness.onTabRemoved.emit(1)[0];
+    scenario.release();
+    await closing;
+  } else if (interleaving === 'new-work') {
+    const stopping = context.handleStop(1);
+    scenario.release();
+    assert.equal((await stopping).ok, true);
+    if (scenario.initialOperation) await scenario.initialOperation;
+    if (scenario.reconciliation) await scenario.reconciliation;
+    newerOperation = context.handleFormatStart({ tabId: 1, text: 'new work source', url: scenario.harness.tab.url });
+    await waitFor(() => scenario.router.count('/format') === initialFormatCalls + 1, 'new work format was not dispatched');
+  } else {
+    assert.fail(`unknown interleaving: ${interleaving}`);
+  }
+
+  if (scenario.initialOperation) await scenario.initialOperation;
+  if (scenario.reconciliation) await scenario.reconciliation;
+
+  const expectedFormatCalls = initialFormatCalls + (interleaving === 'replacement' || interleaving === 'new-work' ? 1 : 0);
+  assert.equal(scenario.router.count('/format'), expectedFormatCalls);
+  assert.equal(scenario.router.count('/translate'), 0);
+  assert.equal(scenario.router.count('/save'), scenario.boundary === 'save-response' ? 1 : 0);
+  assert.equal(
+    scenario.harness.runtimeMessages.filter(message => message.type === 'offscreen:copy').length,
+    0,
+  );
+  assert.equal(scenario.harness.notifications.length, 0);
+
+  if (newerOperation) {
+    const stopping = context.handleStop(1);
+    await stopping;
+    await newerOperation;
+  }
+}
+
+for (const boundary of [
+  'storage-set',
+  'storage-remove',
+  'recovery-read',
+  'textkit-endpoint-settings',
+  'auto-copy-settings',
+  'auto-save-settings',
+  'auto-translate-settings',
+  'filebridge-endpoint-settings',
+  'response-parse',
+  'copy-setup',
+  'save-response',
+]) {
+  for (const interleaving of ['stop', 'replacement', 'close', 'new-work']) {
+    test(`stale ${boundary} continuation is fenced during ${interleaving}`, async () => {
+      const scenario = await runAtAsyncBoundary(boundary);
+      await interleaveAtBoundary(scenario, interleaving);
+    });
+  }
+}
+
+test('test_newer_in_memory_root_beats_older_matching_terminal_record', async () => {
+  const router = createFetchRouter();
+  const local = createPersistentStorage();
+  const harness = createBackgroundHarness({ local, fetch: router.fetch });
+  const currentOperation = harness.context.handleFormatStart({
+    tabId: 1,
+    text: 'new source',
+    url: harness.tab.url,
+  });
+  await waitFor(() => router.count('/format') === 1, 'newer format did not start');
+  const stateBefore = harness.context.__states.get(1);
+  const newerRootId = stateBefore.rootId;
+  const newerStageId = stateBefore.stageId;
+  await local.set({
+    'transform:operation:1': savedRecord({ rootId: 'old-root', stageId: 'old-stage' }),
+    'transcript_recovery:1': completedMarker('old-root'),
+  });
+
+  const state = await reconcile(harness);
+  assert.equal(state.rootId, newerRootId);
+  assert.equal(state.stageId, newerStageId);
+  assert.equal(state.active, false);
+  assert.equal(state.format.active, true);
+  assert.equal(state.format.sourceText, 'new source');
+
+  await harness.context.handleFormatStop(1, { rootId: newerRootId, stageId: newerStageId });
+  await currentOperation;
+});
+
+function localTranscript(text, url) {
+  return {
+    'transcript:1': { text, url },
+    'transcript_raw:1': text,
+  };
+}
+
+test('reconciliation hydrates persisted transcript object for the exact tab URL', async () => {
+  const local = createPersistentStorage(localTranscript('matching text', 'https://example.test/video'));
+  const state = await reconcile(createBackgroundHarness({ local, fetch: createFetchRouter().fetch }));
+  assert.equal(state.transcript, 'matching text');
+});
+
+test('reconciliation hydrates persisted raw local path for an equivalent file URL', async () => {
+  const local = createPersistentStorage(localTranscript('local text', '/a/My Video.mp4'));
+  const harness = createBackgroundHarness({
+    local,
+    fetch: createFetchRouter().fetch,
+    tabUrl: 'file:///a/My%20Video.mp4',
+  });
+  const state = await reconcile(harness);
+  assert.equal(state.transcript, 'local text');
+  assert.deepEqual(plain(state.format.retry), { kind: 'legacy' });
+});
+
+test('reconciliation hydrates a file URL transcript for its equivalent raw path', async () => {
+  const local = createPersistentStorage(localTranscript('local text', 'file:///a/My%20Video.mp4'));
+  const harness = createBackgroundHarness({
+    local,
+    fetch: createFetchRouter().fetch,
+    tabUrl: '/a/My Video.mp4',
+  });
+  const state = await reconcile(harness);
+  assert.equal(state.transcript, 'local text');
+  assert.deepEqual(plain(state.format.retry), { kind: 'legacy' });
+});
+
+test('legacy local-path retry accepts the equivalent file URL and retains Force', async () => {
+  const router = createFetchRouter();
+  const local = createPersistentStorage({
+    ...localTranscript('local text', '/a/My Video.mp4'),
+    'transcript_force:1': true,
+  });
+  const harness = createBackgroundHarness({
+    local,
+    fetch: router.fetch,
+    tabUrl: 'file:///a/My%20Video.mp4',
+  });
+  const state = await reconcile(harness);
+  const retry = harness.context.handleTransformRetry({ tabId: 1, descriptor: state.format.retry });
+  await waitFor(() => router.count('/format') === 1, 'local transcript retry did not start');
+  assert.equal(JSON.parse(router.entry('/format').init.body).force, true);
+  router.resolve('/format', jsonResponse({ text: 'formatted local text' }));
+  assert.equal((await retry).ok, true);
+});
+
+test('reconciliation hydrates a legacy string transcript entry', async () => {
+  const local = createPersistentStorage({ 'transcript:1': 'legacy transcript text' });
+  const state = await reconcile(createBackgroundHarness({ local, fetch: createFetchRouter().fetch }));
+  assert.equal(state.transcript, 'legacy transcript text');
+});
+
+test('reconciliation does not hydrate a transcript object from another URL', async () => {
+  const local = createPersistentStorage(localTranscript('other source', 'https://example.test/other'));
+  const state = await reconcile(createBackgroundHarness({ local, fetch: createFetchRouter().fetch }));
+  assert.equal(state.transcript, '');
+  assert.equal(state.format.retry, null);
+});
+
+test('legacy recovery defaults absent Force to false', async () => {
+  const local = createPersistentStorage({
+    'transcript_raw:1': 'saved transcript',
+    'transcript:1': { text: 'saved transcript', url: 'https://example.test/video' },
+  });
+  const state = await reconcile(createBackgroundHarness({ local, fetch: createFetchRouter().fetch }));
+  assert.equal(state.force, false);
+  assert.equal(state.format.force, false);
 });
 
 test('test_restart_between_terminal_write_and_record_removal_is_idempotent', async () => {

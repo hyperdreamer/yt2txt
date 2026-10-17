@@ -365,6 +365,25 @@ function resetState(tabId) {
   return broadcastState(tabId);
 }
 
+function sourceKey(raw) {
+  const value = String(raw ?? '');
+  if (/^file:/i.test(value)) {
+    try {
+      return decodeURIComponent(new URL(value).pathname);
+    } catch {
+      return value;
+    }
+  }
+  return value;
+}
+
+function sourceUrlsMatch(sourceUrl, currentUrl) {
+  if (typeof sourceUrl !== 'string' || typeof currentUrl !== 'string') return false;
+  return sourceUrl === currentUrl || (
+    sourceUrl !== '' && currentUrl !== '' && sourceKey(sourceUrl) === sourceKey(currentUrl)
+  );
+}
+
 function validateOperationRecord(value, tabId, currentUrl) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const fields = ['version', 'rootId', 'stageId', 'tabId', 'stage', 'status', 'sourceText',
@@ -375,7 +394,7 @@ function validateOperationRecord(value, tabId, currentUrl) {
   if (value.stage !== 'format' && value.stage !== 'translate') return null;
   if (value.status !== 'running' && value.status !== 'failed') return null;
   if (!isNonEmptyString(value.sourceText)) return null;
-  if (typeof value.sourceUrl !== 'string' || value.sourceUrl !== currentUrl) return null;
+  if (!sourceUrlsMatch(value.sourceUrl, currentUrl)) return null;
   if (value.sourceKind !== 'transcript' && value.sourceKind !== 'format' && value.sourceKind !== 'standalone') return null;
   if (typeof value.force !== 'boolean' || typeof value.error !== 'string') return null;
   if (value.status === 'failed' && !isNonEmptyString(value.error)) return null;
@@ -390,9 +409,10 @@ function retryDescriptorFor(record) {
 function applyPersistedResults(state, stored, tabId, currentUrl) {
   const transcript = stored[transcriptKey(tabId)];
   const transcriptMatches = transcript && typeof transcript === 'object' &&
-    typeof transcript.url === 'string' && transcript.url === currentUrl;
+    typeof transcript.url === 'string' && sourceUrlsMatch(transcript.url, currentUrl);
   const raw = stored[transcriptRawKey(tabId)];
-  if (transcriptMatches) state.transcript = isNonEmptyString(raw) ? raw : (transcript.text || '');
+  if (typeof transcript === 'string') state.transcript = transcript;
+  else if (transcriptMatches) state.transcript = isNonEmptyString(raw) ? raw : (transcript.text || '');
   if (typeof stored[formatResultKey(tabId)] === 'string') {
     state.format.resultText = stored[formatResultKey(tabId)];
   }
@@ -436,11 +456,11 @@ function applyLegacyRecoveryState(state, text, sourceUrl, force) {
   state.error = '';
   state.stopRequested = false;
   state.sourceUrl = sourceUrl;
-  state.force = undefined;
+  state.force = force === true;
   state.format.sourceText = text;
   state.format.sourceUrl = sourceUrl;
   state.format.sourceKind = 'transcript';
-  state.format.force = undefined;
+  state.format.force = force === true;
   state.format.active = false;
   state.format.status = 'Ready to retry formatting.';
   state.format.error = '';
@@ -547,6 +567,10 @@ async function reconcileTabState(tabId, currentUrl, acceptance = acceptanceClock
     return state;
   }
 
+  if (current && record && current.rootId !== record.rootId) {
+    return states.get(tabId) || createState();
+  }
+
   let hydratedRecord = terminalSuppressed ? null : record;
   if (hydratedRecord && hydratedRecord.status === 'running') {
     hydratedRecord = await reconcileInterruptedRecord(tabId, acceptance, observedRootId, hydratedRecord);
@@ -582,7 +606,7 @@ async function reconcileTabState(tabId, currentUrl, acceptance = acceptanceClock
 
   if (hydratedRecord) {
     if (markerValid && (marker.terminal === 'stopped' || marker.terminal === 'completed') &&
-        marker.rootId === hydratedRecord.rootId) {
+        marker.rootId === hydratedRecord.rootId && (!current || current.rootId === hydratedRecord.rootId)) {
       if (!current && Object.hasOwn(stored, activityName)) {
         await reconcileCleanup(tabId, acceptance, observedRootId, [activityName], [activityName]);
       }
@@ -601,7 +625,7 @@ async function reconcileTabState(tabId, currentUrl, acceptance = acceptanceClock
   const transcriptUrl = transcript && typeof transcript === 'object' ? transcript.url : null;
   const raw = stored[transcriptRawKey(tabId)];
   const formatResult = stored[formatResultKey(tabId)];
-  const legacyUrlMatches = typeof transcriptUrl === 'string' && transcriptUrl === currentUrl;
+  const legacyUrlMatches = typeof transcriptUrl === 'string' && sourceUrlsMatch(transcriptUrl, currentUrl);
   if (markerAllowsLegacy && legacyUrlMatches && isNonEmptyString(raw) && !isNonEmptyString(formatResult)) {
     applyLegacyRecoveryState(state, raw, transcriptUrl, stored[transcriptForceKey(tabId)] === true);
   }
@@ -1586,8 +1610,10 @@ async function handleTransformRetry(message) {
     if (!isNonEmptyString(text)) return { ok: false, error: 'No transcript is available to retry.' };
     const url = await getTabUrl(tabId);
     if (!canAcceptStart(tabId, acceptance)) return { ok: false, error: 'Retry was cancelled or superseded.' };
-    const savedUrl = transcript && typeof transcript === 'object' ? transcript.url : url;
-    if (savedUrl && url && savedUrl !== url) return { ok: false, error: 'Retry source no longer matches this tab.' };
+    const savedUrl = transcript && typeof transcript === 'object' && typeof transcript.url === 'string'
+      ? transcript.url
+      : url;
+    if (savedUrl && url && !sourceUrlsMatch(savedUrl, url)) return { ok: false, error: 'Retry source no longer matches this tab.' };
     const latest = await storageQueue.read(tabId, [
       transcriptRawKey(tabId), transcriptKey(tabId), transcriptForceKey(tabId),
       transcriptRecoveryKey(tabId), formatResultKey(tabId),

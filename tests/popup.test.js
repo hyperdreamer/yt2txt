@@ -537,7 +537,7 @@ test('doTranslation sends translate:start with only type, tabId, text, language'
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// Source chip + sourceKey + init restore (local file transcription)
+// Source chip + sourceKey + worker snapshot rendering (local file transcription)
 // ═══════════════════════════════════════════════════════════════════
 
 test('source chip labels a percent-encoded local file', () => {
@@ -601,7 +601,7 @@ test('init() hides the chip for a relative path', async () => {
   assert.equal(harness.elements['source-chip'].classList.contains('hidden'), true);
 });
 
-test('init() restores a legacy string entry', async () => {
+test('init renders a transcript string supplied by worker state', async () => {
   const harness = createPopupHarness({
     state: { transcript: 'LEGACY' },
   });
@@ -609,7 +609,7 @@ test('init() restores a legacy string entry', async () => {
   assert.equal(harness.elements['result'].value, 'LEGACY');
 });
 
-test('init() restores an object entry matching tab.url', async () => {
+test('init renders the transcript supplied by worker state for an https tab', async () => {
   const harness = createPopupHarness({
     tabUrl: 'https://youtube.com/watch?v=test',
     state: { transcript: 'MATCHED' },
@@ -618,7 +618,7 @@ test('init() restores an object entry matching tab.url', async () => {
   assert.equal(harness.elements['result'].value, 'MATCHED');
 });
 
-test('init() restores a raw local path entry on the equivalent file:// tab', async () => {
+test('init renders worker-supplied transcript text for a file tab', async () => {
   const harness = createPopupHarness({
     tabUrl: 'file:///a/My%20Video.mp4',
     state: { transcript: 'LOCAL TEXT' },
@@ -627,7 +627,7 @@ test('init() restores a raw local path entry on the equivalent file:// tab', asy
   assert.equal(harness.elements['result'].value, 'LOCAL TEXT');
 });
 
-test('init() leaves the textarea empty for a mismatching URL', async () => {
+test('init renders an empty transcript from an empty worker snapshot', async () => {
   const harness = createPopupHarness({
     tabUrl: 'https://youtube.com/watch?v=test',
     state: { transcript: '' },
