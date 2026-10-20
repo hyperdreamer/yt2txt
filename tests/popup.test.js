@@ -35,7 +35,6 @@ function createPopupHarness(options = {}) {
 
   const fetchCalls = [];
   const runtimeMessages = [];
-  const messageListeners = [];
   const localData = { ...(options.localData || {}) };
 
   // ---- minimal DOM elements -------------------------------------------
@@ -179,16 +178,8 @@ function createPopupHarness(options = {}) {
       query: async () => [{ id: 1, url: options.tabUrl || 'https://youtube.com/watch?v=test' }],
     },
     runtime: {
-      onMessage: {
-        addListener(listener) { messageListeners.push(listener); },
-      },
-      sendMessage(msg) {
-        runtimeMessages.push(msg);
-        if (msg?.type === 'popup:get-state') {
-          return Promise.resolve({ ok: true, tabId: 1, state: options.state || { transcript: '' } });
-        }
-        return Promise.resolve({ ok: true });
-      },
+      onMessage: { addListener() {} },
+      sendMessage(msg) { runtimeMessages.push(msg); return Promise.resolve({ ok: true }); },
     },
     commands: { onCommand: { addListener() {} } },
   };
@@ -221,17 +212,7 @@ function createPopupHarness(options = {}) {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(POPUP_PATH, 'utf8'), context, { filename: POPUP_PATH });
 
-  return {
-    context,
-    elements,
-    fetchCalls,
-    syncValues,
-    runtimeMessages,
-    messageListeners,
-    emit(message) {
-      for (const listener of messageListeners) listener(message, {}, () => {});
-    },
-  };
+  return { context, elements, fetchCalls, syncValues, runtimeMessages };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -550,7 +531,7 @@ test('doTranslation sends translate:start with only type, tabId, text, language'
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// Source chip + sourceKey + worker snapshot rendering (local file transcription)
+// Source chip + sourceKey + init restore (local file transcription)
 // ═══════════════════════════════════════════════════════════════════
 
 test('source chip labels a percent-encoded local file', () => {
@@ -614,36 +595,36 @@ test('init() hides the chip for a relative path', async () => {
   assert.equal(harness.elements['source-chip'].classList.contains('hidden'), true);
 });
 
-test('init renders a transcript string supplied by worker state', async () => {
+test('init() restores a legacy string entry', async () => {
   const harness = createPopupHarness({
-    state: { transcript: 'LEGACY' },
+    localData: { 'transcript:1': 'LEGACY' },
   });
   await harness.context.init();
   assert.equal(harness.elements['result'].value, 'LEGACY');
 });
 
-test('init renders the transcript supplied by worker state for an https tab', async () => {
+test('init() restores an object entry matching tab.url', async () => {
   const harness = createPopupHarness({
     tabUrl: 'https://youtube.com/watch?v=test',
-    state: { transcript: 'MATCHED' },
+    localData: { 'transcript:1': { text: 'MATCHED', url: 'https://youtube.com/watch?v=test' } },
   });
   await harness.context.init();
   assert.equal(harness.elements['result'].value, 'MATCHED');
 });
 
-test('init renders worker-supplied transcript text for a file tab', async () => {
+test('init() restores a raw local path entry on the equivalent file:// tab', async () => {
   const harness = createPopupHarness({
     tabUrl: 'file:///a/My%20Video.mp4',
-    state: { transcript: 'LOCAL TEXT' },
+    localData: { 'transcript:1': { text: 'LOCAL TEXT', url: '/a/My Video.mp4' } },
   });
   await harness.context.init();
   assert.equal(harness.elements['result'].value, 'LOCAL TEXT');
 });
 
-test('init renders an empty transcript from an empty worker snapshot', async () => {
+test('init() leaves the textarea empty for a mismatching URL', async () => {
   const harness = createPopupHarness({
     tabUrl: 'https://youtube.com/watch?v=test',
-    state: { transcript: '' },
+    localData: { 'transcript:1': { text: 'OTHER', url: 'https://youtube.com/other' } },
   });
   await harness.context.init();
   assert.equal(harness.elements['result'].value, '');
@@ -657,89 +638,4 @@ test('startCapture shows the URL-or-local-path message for empty input', async (
     harness.elements['status-bar'].textContent,
     'Enter a video URL or a local video path (for example the file:// URL of a video open in this tab).',
   );
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// Hydrated ownership IDs
-// ═══════════════════════════════════════════════════════════════════
-
-test('hydrated ownership ids drive the active Stop controls', async () => {
-  const harness = createPopupHarness({
-    state: {
-      active: false,
-      status: 'Idle',
-      progress: 'Formatting...',
-      transcript: 'TRANSCRIPT TEXT',
-      error: '',
-      rootId: 'root-1',
-      stageId: 'stage-1',
-      format: {
-        sourceText: 'TRANSCRIPT TEXT',
-        resultText: '',
-        active: true,
-        status: 'Formatting...',
-        error: '',
-        retry: null,
-      },
-    },
-  });
-  await harness.context.init();
-
-  assert.equal(harness.elements['format-btn'].textContent, 'Stop');
-  assert.equal(harness.elements['format-btn'].disabled, false);
-
-  await harness.context.doFormat();
-
-  const stops = harness.runtimeMessages.filter((m) => m.type === 'format:stop');
-  assert.equal(stops.length, 1);
-  assert.equal(stops[0].tabId, 1);
-  assert.equal(stops[0].rootId, 'root-1');
-  assert.equal(stops[0].stageId, 'stage-1');
-});
-
-test('state:update from another tab is ignored', async () => {
-  const harness = createPopupHarness({
-    state: { transcript: 'CURRENT TAB' },
-  });
-  await harness.context.init();
-  assert.ok(harness.messageListeners.length > 0, 'popup registers a runtime listener');
-
-  harness.emit({
-    type: 'state:update',
-    tabId: 2,
-    state: { transcript: 'OTHER TAB' },
-  });
-  assert.equal(harness.elements['result'].value, 'CURRENT TAB');
-
-  harness.emit({
-    type: 'state:update',
-    tabId: 1,
-    state: { transcript: 'SAME TAB' },
-  });
-  assert.equal(harness.elements['result'].value, 'SAME TAB');
-});
-
-test('hydrated translate retry descriptor relabels the existing action button', async () => {
-  const harness = createPopupHarness({
-    state: {
-      transcript: 'TRANSCRIPT TEXT',
-      rootId: 'root-tl',
-      stageId: 'stage-tl',
-      translate: {
-        sourceText: 'SAVED SOURCE',
-        resultText: '',
-        active: false,
-        status: 'Translation failed.',
-        error: 'Translation failed.',
-        targetLanguage: 'German',
-        retry: { kind: 'record', rootId: 'root-tl', stageId: 'stage-tl' },
-      },
-    },
-  });
-  await harness.context.init();
-
-  assert.equal(harness.elements['tl2-translate'].textContent, 'Retry');
-  assert.equal(harness.elements['tl2-translate'].disabled, false);
-  assert.equal(harness.elements['tl2-language'].value, 'original',
-    'the saved language is not copied into the selector');
 });
